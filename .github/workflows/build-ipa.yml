@@ -56,6 +56,8 @@ jobs:
             git -C "$GPU_DEPS/$1" fetch -q --depth 1 origin "$3"; git -C "$GPU_DEPS/$1" checkout -q --detach FETCH_HEAD
           }
           pinned depot_tools https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_REV"
+          # Initialize depot_tools' bundled Python/CIPD once (its wrappers need it).
+          (cd "$GPU_DEPS/depot_tools" && DEPOT_TOOLS_UPDATE=0 ./ensure_bootstrap)
           pinned virglrenderer https://gitlab.freedesktop.org/virgl/virglrenderer.git "$VIRGL_REV"
           pinned libepoxy https://github.com/anholt/libepoxy.git "$EPOXY_REV"
           pinned angle https://chromium.googlesource.com/angle/angle.git "$ANGLE_REV"
@@ -78,7 +80,9 @@ jobs:
       - name: Build GPU dependencies (ANGLE/Metal, libepoxy, virglrenderer)
         if: steps.gpucache.outputs.cache-hit != 'true'
         run: |
-          export PATH="$GPU_DEPS/depot_tools:$PATH" DEPOT_TOOLS_UPDATE=0
+          # Homebrew's ninja (not depot_tools' wrapper); the script puts
+          # depot_tools on PATH for gn itself.
+          export DEPOT_TOOLS_UPDATE=0
           scripts/build-gpu-deps.sh iphoneos
           rm -rf build/gpu/iphoneos/work
 
