@@ -44,7 +44,7 @@
     },
     {
       "name": "desktop-components.sh",
-      "sha256": "70d3176a1d7b0ddc12a4df4906c05f5abaa5d4b3999a4bf66c60dbbb49e0f26c",
+      "sha256": "f1bc3ecdb43b3ecd7471a12c6537cd3931865ffecddabc2bf265d4cc1f7e2608",
       "mode": "0755"
     },
     {
@@ -84,7 +84,7 @@
     },
     {
       "name": "desktop-profile.sh",
-      "sha256": "a5ca752fae6083c67680f5d194f2972c54971b982f2f04a4abe0c50bff8699c6",
+      "sha256": "dd9e5918f296e0fc4090c542eff57ee8026aede01a1e5f854c0e55d48bafe1f0",
       "mode": "0755"
     },
     {
@@ -115,6 +115,11 @@
     {
       "name": "firefox-test.html",
       "sha256": "b0a9675d3205c935c4e3df331d3819e494898d32ee3f81ffd1f7a4bcfe8ca743",
+      "mode": "0644"
+    },
+    {
+      "name": "fit-windows.c",
+      "sha256": "2f9eac3308dd49bb49c17e32c051a77e879282e22a0e15eb19b07868217b5c43",
       "mode": "0644"
     },
     {
@@ -314,7 +319,7 @@
     },
     {
       "name": "installer-run.sh",
-      "sha256": "02f0d885bd489f862d9b27842495bfc6bf487514926dc8a3ad4ab25fe77280b7",
+      "sha256": "01aec9b67c64dcd549075516acb0e924b8202b0988a25a641be0008a12d304d3",
       "mode": "0755"
     },
     {
@@ -409,7 +414,7 @@
     },
     {
       "name": "session.sh",
-      "sha256": "7d33bc02a949ae221e24f9bf5861a8fb0238211b3c125d2f1d1a2bb46bd60ba0",
+      "sha256": "040051f986d6d9f1b8c01efa1d6aa1216953cd55b5c0900515ab58832ac0f327",
       "mode": "0755"
     },
     {

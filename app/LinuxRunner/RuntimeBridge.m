@@ -16,6 +16,7 @@
 #include <sys/proc.h>
 #ifdef LINUXRUNNER_JIT_BUILD
 #include "asbestos/guest-arm64/jit.h"
+#include "platform/native_fault.h"
 #endif
 #include <os/log.h>
 #include <errno.h>
@@ -557,6 +558,14 @@ static NSString *LRThermalState(void) {
 // The interpreter always runs. In the JIT-capable variant the translator
 // starts once jit_ios_acquire() succeeds; nothing maps executable memory
 // before that, and the mode the user picked is never reported as active.
+static int LRTXMClaimState(void){
+#ifdef LINUXRUNNER_JIT_BUILD
+    return jit_ios_txm_claim_state(NULL,0);
+#else
+    return 0;
+#endif
+}
+static void *LRJITAttachWatcher(void *context);
 static NSString *const LRExecutionModeKey=@"LinuxRunnerExecutionMode";
 static NSString *const LRJITAttemptKey=@"LinuxRunnerJITAttemptInProgress";
 static NSString *const LRJITCrashedPathsKey=@"LinuxRunnerJITCrashedPaths";
@@ -630,17 +639,31 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
     NSArray *crashed=[defaults stringArrayForKey:LRJITCrashedPathsKey]?:@[];
     BOOL traced=self.debuggerAttached,txmDevice=self.requiresPreparedJITRegion;
     NSMutableArray *paths=[NSMutableArray array];
+    // LinuxRunner fork: on TXM devices (iOS 26+) the classic vm_remap/mprotect
+    // path is never tried: TXM refuses or kills it, and with a debugger attached
+    // the resulting exception stopped the app at a suspended StikDebug (freeze).
     // Classic dual mapping: iOS's own mprotect check decides; harmless when refused.
-    if(![crashed containsObject:@"classic"])[paths addObject:@"classic"];
-    // TXM: only while a debugger is attached (a brk without StikDebug's script kills the app).
-    if(txmDevice&&traced&&![crashed containsObject:@"txm"])[paths addObject:@"txm"];
-    NSString *why=traced||!txmDevice?@"No usable JIT path":@"Attach LinuxRunner with StikDebug first (iOS 26 and later need its script)";
+    if(!txmDevice&&![crashed containsObject:@"classic"])[paths addObject:@"classic"];
+    // TXM: only the region claimed when the debugger attached (LRClaimJITAtAttach)
+    // is used here. Never a brk on demand: StikDebug is suspended by then.
+    char claimDetail[160]={0};int claim=jit_ios_txm_claim_state(claimDetail,sizeof claimDetail);
+    if(txmDevice&&claim==2)[paths addObject:@"txm"];
+    NSString *why=!txmDevice?@"No usable JIT path":
+        claim==1?@"JIT region claim in progress":
+        claim==3?[NSString stringWithFormat:@"StikDebug claim failed: %s",claimDetail]:
+        @"Launch LinuxRunner from StikDebug (universal script); the JIT region is claimed the moment it attaches";
     for(NSString *path in paths){
         [defaults setObject:path forKey:LRJITAttemptKey];[defaults synchronize];
         char text[256]={0};int rc=jit_ios_acquire([path isEqual:@"txm"],text,sizeof text);
         [defaults removeObjectForKey:LRJITAttemptKey];[defaults synchronize];
         why=[NSString stringWithFormat:@"%@: %s",[path isEqual:@"txm"]?@"TXM":@"Classic",text];
-        if(rc==0){if(detail)*detail=done(YES,[@"JIT active · " stringByAppendingString:why]);return YES;}
+        if(rc==0){
+            // LinuxRunner fork: translated code relies on the host fault adapter
+            // (a stale TLB pointer after copy-on-write faults in native code and is
+            // redirected back to the dispatcher). Upstream only installed it in the
+            // AOT bootstrap, so the app crashed on the first such fault.
+            if(ish_app_native_fault_install()!=0)[self logCategory:@"JIT" event:[NSString stringWithFormat:@"native fault adapter install failed errno=%d",errno]];
+            if(detail)*detail=done(YES,[@"JIT active · " stringByAppendingString:why]);return YES;}
     }
     LRJITLastFailure=why;
     if(detail)*detail=done(NO,why);return NO;
@@ -665,7 +688,7 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
     else if([self.executionMode isEqual:@"interpreter"]){state=@"Interpreter Active";detail=self.debuggerAttached?@"A debugger is attached: choose Automatic or JIT to use it":@"Interpreter selected";}
     else if(LRJITLastFailure){state=@"JIT Unavailable";detail=[LRJITLastFailure stringByAppendingString:@" · interpreter fallback active"];}
     else if(self.debuggerAttached){state=@"JIT Available";detail=@"Debugger attached · tap Activate JIT Now";}
-    else {state=@"Waiting for JIT Authorization";detail=self.requiresPreparedJITRegion?@"Debugger attachment not detected · attach with StikDebug (its universal script) and return here":@"Executable memory not yet allowed · enable JIT for LinuxRunner in StikDebug and return here";}
+    else {state=@"Waiting for JIT Authorization";detail=self.requiresPreparedJITRegion?@"No JIT region yet · start LinuxRunner from StikDebug (universal script); it is claimed the moment StikDebug attaches":@"Executable memory not yet allowed · enable JIT for LinuxRunner in StikDebug and return here";}
 #else
     state=@"Interpreter Active";detail=@"This build is interpreter-only";
 #endif
@@ -676,7 +699,7 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
     // each return to the foreground. The classic path is iOS's own mprotect
     // check (harmless when refused); TXM only runs while a debugger is attached.
     if(!self.jitCompiledIn||LRJITActive||[self.executionMode isEqual:@"interpreter"])return;
-    if(self.requiresPreparedJITRegion&&!self.debuggerAttached){[self logCategory:@"JIT" event:@"foreground check: no debugger attached"];return;}
+    if(self.requiresPreparedJITRegion&&LRTXMClaimState()!=2){[self logCategory:@"JIT" event:@"foreground check: no claimed TXM region"];return;}
     NSString *why=nil;[self activateJIT:&why];
 }
 // 1.1.0: the desktop is landscape 960x540 by default, also in portrait (the
@@ -706,8 +729,57 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
     NSString *mode=self.executionMode;
     if(!self.jitCompiledIn||[mode isEqual:@"interpreter"])return;
     // Automatic and JIT: use what iOS already allows (e.g. launched from StikDebug).
-    if(!self.requiresPreparedJITRegion||self.debuggerAttached){NSString *why=nil;[self activateJIT:&why];}
-    else LRJITDetail=@"Interpreter · attach with StikDebug in Settings › Execution Engine to start the JIT";
+    if(!self.requiresPreparedJITRegion||LRTXMClaimState()==2){NSString *why=nil;[self activateJIT:&why];}
+    else LRJITDetail=@"Interpreter · launch LinuxRunner from StikDebug (universal script) to start the JIT";
+}
+// ---- LinuxRunner fork: JIT claim at attach ----------------------------------
+// Called from main() before UIApplicationMain. If StikDebug launched us, the
+// claim happens immediately while StikDebug is still running its script. A
+// watcher thread covers "attach to running app": it claims the moment P_TRACED
+// appears, before the user switches back (StikDebug is suspended after that).
+static BOOL LRTraced(void){struct kinfo_proc info={0};size_t size=sizeof info;int mib[]={CTL_KERN,KERN_PROC,KERN_PROC_PID,getpid()};return sysctl(mib,4,&info,&size,NULL,0)==0&&(info.kp_proc.p_flag&P_TRACED);}
++ (BOOL)jitClaimOnAttach { id v=[NSUserDefaults.standardUserDefaults objectForKey:@"LinuxRunnerJIT.claimOnAttach"]; return v?[v boolValue]:YES; }
++ (void)setJITClaimOnAttach:(BOOL)on { [NSUserDefaults.standardUserDefaults setBool:on forKey:@"LinuxRunnerJIT.claimOnAttach"]; }
++ (BOOL)jitSafeMode { return [NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerJIT.safeMode"]; }
++ (void)setJITSafeMode:(BOOL)on { [NSUserDefaults.standardUserDefaults setBool:on forKey:@"LinuxRunnerJIT.safeMode"]; }
++ (NSArray<NSString *> *)jitFailedMethods { return [NSUserDefaults.standardUserDefaults stringArrayForKey:LRJITCrashedPathsKey]?:@[]; }
++ (void)resetJITFailures { [NSUserDefaults.standardUserDefaults removeObjectForKey:LRJITCrashedPathsKey]; [NSUserDefaults.standardUserDefaults removeObjectForKey:LRJITAttemptKey]; LRJITLastFailure=nil; }
++ (void)claimJITAtLaunch {
+#ifdef LINUXRUNNER_JIT_BUILD
+    // Safe mode: conservative translator (no register pinning, block linking,
+    // loop or SIMD translation). Read once by jit_init, so set it before boot.
+    if(self.jitSafeMode){setenv("ISH_JIT_PIN","0",1);setenv("ISH_JIT_LINK","0",1);setenv("ISH_JIT_LOOP","0",1);setenv("ISH_JIT_SIMD","0",1);}
+    if(!self.requiresPreparedJITRegion||!self.jitClaimOnAttach||[self.executionMode isEqual:@"interpreter"])return;
+    NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
+    NSString *stale=[defaults stringForKey:LRJITAttemptKey];
+    if(stale){NSArray *crashed=[defaults stringArrayForKey:LRJITCrashedPathsKey]?:@[];
+        if(![crashed containsObject:stale])[defaults setObject:[crashed arrayByAddingObject:stale] forKey:LRJITCrashedPathsKey];
+        [defaults removeObjectForKey:LRJITAttemptKey];[defaults synchronize];}
+    if([[defaults stringArrayForKey:LRJITCrashedPathsKey] containsObject:@"txm"])return;
+    void (^claim)(void)=^{
+        NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
+        [d setObject:@"txm" forKey:LRJITAttemptKey];[d synchronize];
+        int rc=jit_ios_claim_txm(0);
+        [d removeObjectForKey:LRJITAttemptKey];[d synchronize];
+        char text[160]={0};jit_ios_txm_claim_state(text,sizeof text);
+        [LRRuntimeBridge logCategory:@"JIT" event:[NSString stringWithFormat:@"txm claim rc=%d %s",rc,text]];
+        if(rc==0)dispatch_async(dispatch_get_main_queue(),^{NSString *why=nil;[LRRuntimeBridge activateJIT:&why];});
+    };
+    if(LRTraced()){claim();return;}
+    pthread_t thread;pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+    static void (^watcherClaim)(void);watcherClaim=[claim copy];
+    pthread_create(&thread,&attr,LRJITAttachWatcher,(__bridge void *)watcherClaim);pthread_attr_destroy(&attr);
+#endif
+}
+static void *LRJITAttachWatcher(void *context){
+    pthread_setname_np("LinuxRunner JIT attach watcher");
+    void (^claim)(void)=(__bridge void (^)(void))context;
+    // 20 ms polling costs nothing measurable and keeps the claim well inside
+    // the time StikDebug stays in the foreground after attaching.
+    while(!LRTraced())usleep(20000);
+    usleep(50000);   // let the script finish vAttach/continue before the first brk
+    claim();
+    return NULL;
 }
 + (BOOL)activeEnvironmentIsDebian {
     // Catalog identity is authoritative; no inference from a library name.
@@ -1274,8 +1346,24 @@ static void LRWaitForProcess(TerminalViewController *process, NSTimeInterval tim
     for (NSString *path in @[@"/usr/bin/Hyprland", @"/usr/bin/waybar", @"/usr/bin/fuzzel", @"/usr/bin/seatd"]) if (!LRReadGuestFile(path, 4).length) return NO;
     return YES;
 }
+// LinuxRunner fork: mobile shells.
++ (void)installPhosh:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion {
+    [self runDesktopProfile:@"phosh" progress:progress completion:completion];
+}
++ (BOOL)phoshInstalled {
+    if (!LRReadGuestFile(@"/usr/bin/phoc", 4).length) return NO;
+    for (NSString *path in @[@"/usr/libexec/phosh", @"/usr/lib/phosh/phosh", @"/usr/bin/phosh"]) if (LRReadGuestFile(path, 4).length) return YES;
+    return NO;
+}
++ (void)installPlasmaMobile:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion {
+    [self runDesktopProfile:@"plasma-mobile" progress:progress completion:completion];
+}
++ (BOOL)plasmaMobileInstalled {
+    for (NSString *path in @[@"/usr/bin/startplasma-wayland", @"/usr/bin/kwin_wayland", @"/usr/share/plasma/shells/org.kde.plasma.mobileshell/metadata.json"]) if (!LRReadGuestFile(path, 4).length) return NO;
+    return YES;
+}
 + (void)runDesktopProfile:(NSString *)mode progress:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion {
-    NSString *title = [mode isEqual:@"plasma"] ? @"Installing KDE Plasma" : [mode isEqual:@"lxqt"] ? @"Installing LXQt" : [mode isEqual:@"enlightenment"] ? @"Installing Enlightenment" : [mode isEqual:@"wayfire"] ? @"Installing Wayfire" : [mode isEqual:@"hyprland"] ? @"Installing Hyprland" : @"Installing Desktop Components";
+    NSString *title = [mode isEqual:@"plasma"] ? @"Installing KDE Plasma" : [mode isEqual:@"lxqt"] ? @"Installing LXQt" : [mode isEqual:@"enlightenment"] ? @"Installing Enlightenment" : [mode isEqual:@"wayfire"] ? @"Installing Wayfire" : [mode isEqual:@"hyprland"] ? @"Installing Hyprland" : [mode isEqual:@"phosh"] ? @"Installing Phosh" : [mode isEqual:@"plasma-mobile"] ? @"Installing Plasma Mobile" : @"Installing Desktop Components";
     [self runSupportInstall:@[mode] title:title progress:progress completion:completion];
 }
 

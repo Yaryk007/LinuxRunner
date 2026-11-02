@@ -78,7 +78,8 @@ if [[ $mode == unsigned ]]; then
     python3 - "$staging/entitlements.plist" "${BUNDLE_ID:-dev.linuxrunner.app}" "$diagnostic" <<'PYADHOC'
 import plistlib, sys
 with open(sys.argv[1], 'wb') as out:
-    plistlib.dump({} if sys.argv[3] == 'YES' else {'com.apple.security.application-groups': ['group.' + sys.argv[2]]}, out)
+    # get-task-allow: StikDebug must be able to attach for the JIT (fork).
+    plistlib.dump({'get-task-allow': True} if sys.argv[3] == 'YES' else {'com.apple.security.application-groups': ['group.' + sys.argv[2]], 'get-task-allow': True}, out)
 PYADHOC
     # Retain exactly the signed executable shipped in the IPA, so the archive
     # provenance check remains byte-for-byte strict after ad-hoc signing.

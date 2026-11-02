@@ -558,6 +558,7 @@ static NSString *ApplicationPreflightFailure(NSURL *session) {
 @property NSMutableArray<UIButton *> *modifierButtons;
 @property NSArray<UIView *> *launchControls;
 @property UISegmentedControl *resolution;
+@property (copy) NSString *liveGeometry;   // size last given to the running session
 @property BOOL desktopMode;
 @property NSTimer *queuedLaunchTimer; // retries a launch request held while the desktop starts
 @property BOOL desktopPainted;
@@ -826,7 +827,7 @@ static NSString *DesktopDegradedNotice(NSString *state);
     [_stack addArrangedSubview:blenderActions];
     UIStackView *browsers=[UIStackView new];browsers.distribution=UIStackViewDistributionFillEqually;
     for(NSArray *item in @[@[@"Install Browser Support",@"installBrowser"],@[@"Run LinuxRunner Browser",@"runBrowser"],@[@"Run Firefox",@"runFirefox"]]){UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];[b setTitle:item[0] forState:UIControlStateNormal];b.titleLabel.font=[UIFont systemFontOfSize:12];b.titleLabel.numberOfLines=2;b.accessibilityIdentifier=item[0];[b addTarget:self action:NSSelectorFromString(item[1]) forControlEvents:UIControlEventTouchUpInside];[browsers addArrangedSubview:b];}
-    [_stack addArrangedSubview:browsers];_resolution=[[UISegmentedControl alloc] initWithItems:_desktopMode?@[@"640×480",@"800×600",@"1024×768",@"960×540",@"Fit"]:@[@"640×480",@"800×600",@"1024×768"]];_resolution.selectedSegmentIndex=_desktopMode?MAX(0,MIN(4,[NSUserDefaults.standardUserDefaults integerForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]])):0;if(_desktopMode&&![NSUserDefaults.standardUserDefaults objectForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]])_resolution.selectedSegmentIndex=3;_resolution.accessibilityIdentifier=@"Display resolution";[_stack addArrangedSubview:_resolution];_launchControls=@[actions,apps,mesaActions,blenderActions,browsers,clock,_resolution];_status=[UILabel new];_status.numberOfLines=0;_status.font=[UIFont systemFontOfSize:13];_status.accessibilityIdentifier=@"GUI status";_status.text=@"Install GUI Support in this environment, then open xclock or xterm. Install Qt Support for the Qt test. DISPLAY and authentication are set automatically per session. Debian GUI/browser acceptance requires physical testing.";[_stack addArrangedSubview:_status];
+    [_stack addArrangedSubview:browsers];_resolution=[[UISegmentedControl alloc] initWithItems:_desktopMode?@[@"640×480",@"800×600",@"1024×768",@"960×540",@"Fit",@"Native",@"Custom"]:@[@"640×480",@"800×600",@"1024×768"]];_resolution.selectedSegmentIndex=_desktopMode?MAX(0,MIN(6,[NSUserDefaults.standardUserDefaults integerForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]])):0;if(_desktopMode&&![NSUserDefaults.standardUserDefaults objectForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]])_resolution.selectedSegmentIndex=3;_resolution.accessibilityIdentifier=@"Display resolution";[_stack addArrangedSubview:_resolution];_launchControls=@[actions,apps,mesaActions,blenderActions,browsers,clock,_resolution];_status=[UILabel new];_status.numberOfLines=0;_status.font=[UIFont systemFontOfSize:13];_status.accessibilityIdentifier=@"GUI status";_status.text=@"Install GUI Support in this environment, then open xclock or xterm. Install Qt Support for the Qt test. DISPLAY and authentication are set automatically per session. Debian GUI/browser acceptance requires physical testing.";[_stack addArrangedSubview:_status];
     _surface=[LRFramebufferView new];[_stack addArrangedSubview:_surface];[_surface.heightAnchor constraintGreaterThanOrEqualToConstant:100].active=YES;
     _modifierButtons=[NSMutableArray new];
     UIStackView *toolbar=[UIStackView new];_inputToolbar=toolbar;toolbar.spacing=4;toolbar.distribution=UIStackViewDistributionFillEqually;
@@ -1386,16 +1387,19 @@ static NSString *LRSessionGraphicsMode(void){
     _audioPort=0;
     if(LRAudioBridge.enabled){int afd=socket(AF_INET,SOCK_STREAM,0);struct sockaddr_in a2={.sin_family=AF_INET,.sin_port=0};a2.sin_addr.s_addr=htonl(INADDR_LOOPBACK);socklen_t l2=sizeof a2;
         if(afd>=0&&!bind(afd,(struct sockaddr *)&a2,sizeof a2)&&!getsockname(afd,(struct sockaddr *)&a2,&l2)&&ntohs(a2.sin_port)!=port)_audioPort=ntohs(a2.sin_port);if(afd>=0)close(afd);}
-    if(_desktopMode){NSString *key=[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName];id saved=[NSUserDefaults.standardUserDefaults objectForKey:key];_resolution.selectedSegmentIndex=saved?MAX(0,MIN(4,[saved integerValue])):3;}
-    NSString *geometry=_desktopMode&&_resolution.selectedSegmentIndex==4?[self fitScreenGeometry]:@[@"640x480",@"800x600",@"1024x768",@"960x540"][_resolution.selectedSegmentIndex];
+    if(_desktopMode){NSString *key=[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName];id saved=[NSUserDefaults.standardUserDefaults objectForKey:key];_resolution.selectedSegmentIndex=saved?MAX(0,MIN(6,[saved integerValue])):3;}
+    NSString *geometry=[self selectedGeometryForSize:self.view.bounds.size];
     {unsigned gw=0,gh=0;if(sscanf(geometry.UTF8String,"%ux%u",&gw,&gh)==2)[LRRuntimeBridge setDesktopDisplayWidth:gw height:gh];}   // KMS compositors use exactly this size
     [LRRuntimeBridge logCategory:@"GUI_SESSION" event:[NSString stringWithFormat:@"root=%@ distribution=%@ geometry=%@ mode=%@ GLX=%@ (server capability; application renderer is independent)",LRRuntimeBridge.activeRootName,[LRRuntimeBridge activeEnvironmentIsDebian]?@"debian":@"alpine",geometry,mode,glxMode]];
     _sessionGuestUser=[LRRuntimeBridge.defaultLinuxUser copy];
     NSString *desktopKey=[@"LinuxRunnerDesktop.environment." stringByAppendingString:LRRuntimeBridge.activeRootName];
     NSString *selectedDesktop=[NSUserDefaults.standardUserDefaults stringForKey:desktopKey];
     if(!selectedDesktop && LRRuntimeBridge.activeEnvironmentIsDebian)selectedDesktop=[NSUserDefaults.standardUserDefaults stringForKey:@"LinuxRunnerDesktop.environment"];
-    NSDictionary *files=@{@"desktop-environment":([selectedDesktop isEqual:@"plasma"]||[selectedDesktop isEqual:@"lxqt"]||[selectedDesktop isEqual:@"enlightenment"]||[selectedDesktop isEqual:@"wayfire"]||[selectedDesktop isEqual:@"hyprland"])?selectedDesktop:@"linuxrunner",@"guest-user":_sessionGuestUser,@"geometry":geometry,@"glx-mode":glxMode,@"gpu-mode":LRSessionGraphicsMode(),@"input-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUIEagerInput"]?@"eager":@"legacy",@"shm-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUISharedImages"]?@"sysv":@"off",@"vnc-timing":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUILowLatencyInput"]?@"threads":@"default",@"password":password,@"cookie":cookie,@"port":[NSString stringWithFormat:@"%u",port],@"audio-port":_audioPort?[NSString stringWithFormat:@"%u",_audioPort]:@"",@"display":[NSString stringWithFormat:@"%u",display]};
+    NSDictionary *files=@{@"desktop-environment":([selectedDesktop isEqual:@"plasma"]||[selectedDesktop isEqual:@"lxqt"]||[selectedDesktop isEqual:@"enlightenment"]||[selectedDesktop isEqual:@"wayfire"]||[selectedDesktop isEqual:@"hyprland"]||[selectedDesktop isEqual:@"phosh"]||[selectedDesktop isEqual:@"plasma-mobile"])?selectedDesktop:@"linuxrunner",@"guest-user":_sessionGuestUser,@"geometry":geometry,@"glx-mode":glxMode,@"gpu-mode":LRSessionGraphicsMode(),@"input-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUIEagerInput"]?@"eager":@"legacy",@"shm-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUISharedImages"]?@"sysv":@"off",@"vnc-timing":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUILowLatencyInput"]?@"threads":@"default",@"password":password,@"cookie":cookie,@"port":[NSString stringWithFormat:@"%u",port],@"audio-port":_audioPort?[NSString stringWithFormat:@"%u",_audioPort]:@"",@"display":[NSString stringWithFormat:@"%u",display]};
     for(NSString *name in files){NSURL *url=[_sessionURL URLByAppendingPathComponent:name];if(![files[name] writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&error]||![NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:url.path error:&error]){[self message:error.localizedDescription];return;}}
+    // LinuxRunner fork: Native follows rotation live (session.sh resizes Xvfb).
+    if(_desktopMode&&_resolution.selectedSegmentIndex==5)[@"1" writeToURL:[_sessionURL URLByAppendingPathComponent:@"resizable"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    _liveGeometry=geometry;
     NSString *xkb=[NSUserDefaults.standardUserDefaults stringForKey:@"LinuxRunnerGUIXKBMode"]?:@"xkb";
     [xkb writeToURL:[_sessionURL URLByAppendingPathComponent:@"xkb-mode"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if([mode isEqual:@"custom"]){
@@ -1455,6 +1459,58 @@ static NSString *DesktopDegradedNotice(NSString *state){
     CGSize s=target?target.bounds.size:self.view.bounds.size;
     uint16_t W,H;lr_desktop_geometry(s.width,s.height,&W,&H);
     return [NSString stringWithFormat:@"%ux%u",W,H];
+}
+// LinuxRunner fork: "Native" is the screen's real pixel count in the current
+// orientation (UIScreen.nativeBounds is always portrait), optionally scaled by
+// Settings › Display › Native Scale; "Custom" is the user's WxH. Even sizes
+// within 320x240..4096x4096 (session.sh validates them).
++ (NSString *)geometryWidth:(double)w height:(double)h{
+    if(!isfinite(w)||!isfinite(h)||w<1||h<1){w=960;h=540;}
+    double cap=fmin(1,fmin(4096/w,4096/h));w*=cap;h*=cap;
+    unsigned W=MAX(320,((unsigned)w)&~1u),H=MAX(240,((unsigned)h)&~1u);
+    return [NSString stringWithFormat:@"%ux%u",W,H];
+}
+- (NSString *)nativeGeometryForSize:(CGSize)size{
+    if([self externalOutputActive]){UIScreen *screen=LRCurrentExternalDisplay.view.window.screen;if(screen){CGSize n=screen.nativeBounds.size;return [LRGUIViewController geometryWidth:n.width height:n.height];}}
+    UIScreen *screen=self.view.window.screen?:UIScreen.mainScreen;
+    CGSize n=screen.nativeBounds.size;double longer=fmax(n.width,n.height),shorter=fmin(n.width,n.height);
+    // The window's share of the screen (iPad split view / Stage Manager), in pixels.
+    double scale=screen.nativeScale>0?screen.nativeScale:screen.scale;
+    double w=size.width*scale,h=size.height*scale;
+    if(!(w>0&&h>0)){BOOL landscape=size.width>size.height;w=landscape?longer:shorter;h=landscape?shorter:longer;}
+    double factor=[NSUserDefaults.standardUserDefaults doubleForKey:@"LinuxRunnerDesktop.nativeScale"];
+    if(!(factor>=.25&&factor<=1))factor=1;
+    return [LRGUIViewController geometryWidth:w*factor height:h*factor];
+}
+- (NSString *)customGeometry{
+    NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
+    NSInteger w=[d integerForKey:@"LinuxRunnerDesktop.customWidth"],h=[d integerForKey:@"LinuxRunnerDesktop.customHeight"];
+    if(w<320||h<240)return @"1280x720";
+    return [LRGUIViewController geometryWidth:w height:h];
+}
+- (NSString *)selectedGeometryForSize:(CGSize)size{
+    if(!_desktopMode)return @[@"640x480",@"800x600",@"1024x768"][MAX(0,MIN(2,_resolution.selectedSegmentIndex))];
+    switch(_resolution.selectedSegmentIndex){
+        case 4:return [self fitScreenGeometry];
+        case 5:return [self nativeGeometryForSize:size];
+        case 6:return [self customGeometry];
+        default:return @[@"640x480",@"800x600",@"1024x768",@"960x540"][MAX(0,MIN(3,_resolution.selectedSegmentIndex))];
+    }
+}
+// Rotation with Native: hand the new size to the running session.
+- (void)requestLiveResizeForSize:(CGSize)size{
+    if(!_desktopMode||_resolution.selectedSegmentIndex!=5||!_sessionURL||!_sessionGuestUser)return;
+    NSString *geometry=[self nativeGeometryForSize:size];
+    if([geometry isEqual:_liveGeometry])return;
+    NSString *state=[NSString stringWithContentsOfURL:[_sessionURL URLByAppendingPathComponent:@"resizable-state"] encoding:NSUTF8StringEncoding error:nil];
+    if(![[state stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqual:@"yes"]){
+        [LRRuntimeBridge logCategory:@"GUI" event:[NSString stringWithFormat:@"live resize to %@ unavailable for this session; applies at next start",geometry]];return;}
+    NSString *guestPath=[NSString stringWithFormat:@"/home/mobile/Downloads/%@/%@/resize-request",LRGUIFolder,_sessionURL.lastPathComponent];
+    NSError *error=nil;
+    if([LRRuntimeBridge writeDesktopRequest:[geometry dataUsingEncoding:NSUTF8StringEncoding] guestPath:[guestPath stringByAppendingString:@".pending"] user:_sessionGuestUser error:&error]&&
+       [LRRuntimeBridge publishDesktopRequest:guestPath user:_sessionGuestUser error:&error]){
+        _liveGeometry=geometry;[LRRuntimeBridge logCategory:@"GUI" event:[NSString stringWithFormat:@"live resize requested %@",geometry]];
+    } else [LRRuntimeBridge logCategory:@"GUI" event:[NSString stringWithFormat:@"live resize request failed: %@",error.localizedDescription]];
 }
 // iPad / hardware keyboard: app actions on Control-Option-Command, a combination
 // Linux desktops do not use, so every other key (Command is Super) still
@@ -1661,7 +1717,8 @@ static NSString *DesktopDegradedNotice(NSString *state){
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
     if(_desktopMode){id automatic=[NSUserDefaults.standardUserDefaults objectForKey:@"LinuxRunnerDesktop.autoFullscreen"];
-        if(!automatic||[automatic boolValue])[coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext>c){[self setImmersive:size.width>size.height];} completion:nil];}
+        if(!automatic||[automatic boolValue])[coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext>c){[self setImmersive:size.width>size.height];} completion:nil];
+        [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext>c){[self requestLiveResizeForSize:self.view.bounds.size];}];}
 }
 - (NSDictionary *)desktopControlState {
     NSMutableDictionary *state=[[self desktopSessionSummary] mutableCopy];
@@ -1690,7 +1747,7 @@ static NSString *DesktopDegradedNotice(NSString *state){
 - (void)performDesktopAction:(NSString *)action {
     if(!NSThread.isMainThread){__weak typeof(self) weak=self;dispatch_async(dispatch_get_main_queue(),^{[weak performDesktopAction:action];});return;}
     if([action isEqual:@"start"]){
-        _resolution.selectedSegmentIndex=MAX(0,MIN(4,[NSUserDefaults.standardUserDefaults objectForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]]?[NSUserDefaults.standardUserDefaults integerForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]]:3));
+        _resolution.selectedSegmentIndex=MAX(0,MIN(6,[NSUserDefaults.standardUserDefaults objectForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]]?[NSUserDefaults.standardUserDefaults integerForKey:[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName]]:3));
         if(!_client)[self run:@"desktop"];
     } else if([action isEqual:@"stop"]){_trackpadRequested=NO;[_restartTimer invalidate];_restartTimer=nil;[self stop];[self message:@"Stopping desktop. Saved files remain in Linux."];}
     else if([action isEqual:@"restart"]){

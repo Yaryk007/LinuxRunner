@@ -150,6 +150,8 @@ struct SetupWizardView: View {
                 if LRRuntimeBridge.activeEnvironmentIsDebian() || LRRuntimeBridge.activeEnvironmentIsArch() {
                     extraDesktopRow("Wayfire", "wayfire", installed: LRRuntimeBridge.wayfireInstalled()) { LRRuntimeBridge.installWayfire($0, completion: $1) }
                 }
+                extraDesktopRow("Phosh (mobile)", "phosh", installed: LRRuntimeBridge.phoshInstalled()) { LRRuntimeBridge.installPhosh($0, completion: $1) }
+                extraDesktopRow("Plasma Mobile (mobile)", "plasma-mobile", installed: LRRuntimeBridge.plasmaMobileInstalled()) { LRRuntimeBridge.installPlasmaMobile($0, completion: $1) }
                 if LRRuntimeBridge.activeEnvironmentIsArch() {
                     extraDesktopRow("Hyprland (experimental)", "hyprland", installed: LRRuntimeBridge.hyprlandInstalled()) { LRRuntimeBridge.installHyprland($0, completion: $1) }
                 }

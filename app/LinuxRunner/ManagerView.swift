@@ -1376,14 +1376,23 @@ struct ExecutionEngineView: View {
                 } footer: {
                     Text("Interpreter always works. Automatic and JIT start the JIT only after iOS allows it — LinuxRunner launched or attached by StikDebug — and otherwise keep the interpreter. The active backend above is what actually runs.")
                 }
+                Section {
+                    Toggle("Claim JIT when StikDebug attaches", isOn: Binding(get: { LRRuntimeBridge.jitClaimOnAttach }, set: { LRRuntimeBridge.jitClaimOnAttach = $0 }))
+                    Toggle("JIT safe mode", isOn: Binding(get: { LRRuntimeBridge.jitSafeMode }, set: { LRRuntimeBridge.jitSafeMode = $0 }))
+                    if (LRRuntimeBridge.jitFailedMethods() as? [String] ?? []).count > 0 {
+                        Button("Re-enable JIT methods disabled after a crash") { LRRuntimeBridge.resetJITFailures(); refresh() }
+                    }
+                } header: { Text("JIT Options") } footer: {
+                    Text("Claim at attach requests StikDebug's code region immediately, then detaches it, so LinuxRunner never waits for a suspended StikDebug (this was the freeze). Turn it off only to debug with Xcode. Safe mode turns off register pinning, block linking, loops and SIMD in the translator. It is slower, but it avoids translator bugs if an app misbehaves with JIT. Both apply from the next launch.")
+                }
                 if !active && (mode != "interpreter" || (report["debugger"] as? Bool ?? false)) {
                     Section {
-                        Button("Attach with StikDebug") { requestAttachment() }
+                        Button(LRRuntimeBridge.requiresPreparedJITRegion() ? "Relaunch with StikDebug" : "Attach with StikDebug") { requestAttachment() }
                         Button("Activate JIT Now") { activate() }
                         if let message { Text(message).font(.footnote).foregroundColor(.orange) }
                     } footer: {
                         Text(LRRuntimeBridge.requiresPreparedJITRegion()
-                             ? "iOS 26 and later: StikDebug attaches with its universal script; return here and LinuxRunner prepares its code region while it is attached. Support on iOS 26 has not been verified on a device yet."
+                             ? "iOS 26 and later: start LinuxRunner from StikDebug with the universal script, or attach to it there. LinuxRunner claims its code region the moment the debugger attaches, while StikDebug is still in the foreground, then detaches it. The JIT then starts without any further step."
                              : "StikDebug attaches and detaches; return here and LinuxRunner checks whether iOS now allows its code region.")
                     }
                 }
@@ -1702,12 +1711,31 @@ private struct DesktopPreferencesView: View {
     @State private var resolution = 3
     @AppStorage("LinuxRunnerDesktop.autoFullscreen") private var autoFullscreen = true
     @AppStorage("LinuxRunnerDesktop.metalPresentation") private var metalPresentation = false
+    @AppStorage("LinuxRunnerDesktop.nativeScale") private var nativeScale = 1.0
+    @AppStorage("LinuxRunnerDesktop.customWidth") private var customWidth = 1280
+    @AppStorage("LinuxRunnerDesktop.customHeight") private var customHeight = 720
+    private var nativeDescription: String {
+        let n = UIScreen.main.nativeBounds.size
+        return "\(Int(max(n.width, n.height))) × \(Int(min(n.width, n.height)))"
+    }
     private var key: String { "LinuxRunnerDesktop.resolution." + LRRuntimeBridge.activeRootName() }
     var body: some View { Form {
         Section("Next Desktop Start") {
-            Picker("Resolution", selection: $resolution) { Text("640 × 480").tag(0); Text("800 × 600").tag(1); Text("1024 × 768").tag(2); Text("960 × 540 · Wide").tag(3); Text("Fit Screen").tag(4) }
+            Picker("Resolution", selection: $resolution) { Text("640 × 480").tag(0); Text("800 × 600").tag(1); Text("1024 × 768").tag(2); Text("960 × 540 · Wide").tag(3); Text("Fit Screen").tag(4); Text("Native · Follows Rotation").tag(5); Text("Custom").tag(6) }
+            if resolution == 5 {
+                Picker("Native Scale", selection: $nativeScale) { Text("100% · Full").tag(1.0); Text("75%").tag(0.75); Text("50% · Faster").tag(0.5) }
+                Text("Native uses this device's real pixel resolution (\(nativeDescription)). When you rotate the device, the running desktop switches between portrait and landscape without restarting. Hyprland, and Wayfire on the GPU, keep their starting size. Higher resolutions need more CPU, so turn on the JIT or pick a lower scale if drawing is slow.").font(.caption)
+            }
+            if resolution == 6 {
+                HStack {
+                    TextField("Width", value: $customWidth, formatter: NumberFormatter()).keyboardType(.numberPad).multilineTextAlignment(.center)
+                    Text("×")
+                    TextField("Height", value: $customHeight, formatter: NumberFormatter()).keyboardType(.numberPad).multilineTextAlignment(.center)
+                }
+                Text("320 × 240 up to 4096 × 4096. Odd numbers are rounded down to even.").font(.caption)
+            }
             Toggle("Immersive Landscape", isOn: $autoFullscreen)
-            Text("Applies after saving documents and stopping the current desktop. The existing session is not resized or interrupted.").font(.caption)
+            Text("Applies after saving documents and stopping the current desktop. Only Native resizes a running session, when you rotate the device.").font(.caption)
         }
         Section("Interaction") {
             Text("Landscape uses the available display while preserving aspect ratio. Pinch to zoom; two fingers pan while zoomed, or scroll while fitted. Long press provides right click.")
@@ -1718,7 +1746,7 @@ private struct DesktopPreferencesView: View {
             Text("Applies when reopening the viewer. Presents the received framebuffer through Metal, with Core Graphics fallback. Linux applications still use software rendering and the ARM64 interpreter. Physical-device performance has not yet been verified.").font(.caption)
         }
         Section("Execution") { Text("ARM64 interpreter; JIT is not required. The renderer for Linux applications is chosen in Settings › Graphics.").font(.caption) }
-    }.navigationTitle("Display & Gestures").onAppear { resolution = UserDefaults.standard.object(forKey: key) == nil ? 3 : min(4, max(0, UserDefaults.standard.integer(forKey: key))) }.onChange(of: resolution) { UserDefaults.standard.set($0, forKey: key) } }
+    }.navigationTitle("Display & Gestures").onAppear { resolution = UserDefaults.standard.object(forKey: key) == nil ? 3 : min(6, max(0, UserDefaults.standard.integer(forKey: key))) }.onChange(of: resolution) { UserDefaults.standard.set($0, forKey: key) } }
 }
 /// Graphics renderer for Linux applications, plus live evidence of what actually ran on the GPU.
 // Folders the user picks in Files (iPhone, iCloud Drive, other providers or an
@@ -1829,7 +1857,7 @@ private struct DevicesView: View {
                 Toggle("External Desktop Output", isOn: $externalOutput)
                 Button("Connect Wirelessly with AirPlay…") { wirelessHelp = true }
                 Text("Shows the Linux desktop in a separate connected-display window. Keyboard, mouse and touch input stay on this device. Closing the viewer keeps output running while LinuxRunner stays in the foreground. Disconnecting returns control to this device; it does not stop Linux.").font(.caption).foregroundStyle(.secondary)
-                Text("Display resolution is selected when a session starts. Stop and restart the desktop with Fit Screen selected to size it for a newly connected monitor. Software rendering is capped at 1600 × 1200.").font(.caption).foregroundStyle(.secondary)
+                Text("Display resolution is selected when a session starts. Stop and restart the desktop with Fit Screen or Native selected to size it for a newly connected monitor. Fit Screen is capped at 1600 × 1200; Native and Custom go up to 4096 × 4096.").font(.caption).foregroundStyle(.secondary)
                 Text("For a connected separate display, choose Desktop → Use This Device as Touchpad. AirPlay mirroring alone shows the same screen on both devices.").font(.caption).foregroundStyle(.secondary)
             } header: { Text("External Monitor · USB-C or AirPlay") }
             Section {} footer: { Text("Linux cannot directly control raw USB devices. A network adapter recognized by iOS can carry LinuxRunner’s host-socket traffic; it does not become a guest-owned USB device. Devices iOS supports use the public interfaces listed above.") }
@@ -2038,6 +2066,10 @@ private struct DesktopEnvironmentView: View {
     @State private var enlightenmentInstalled = LRRuntimeBridge.enlightenmentInstalled()
     @State private var wayfireInstalled = LRRuntimeBridge.wayfireInstalled()
     @State private var hyprlandInstalled = LRRuntimeBridge.hyprlandInstalled()
+    @State private var phoshInstalled = LRRuntimeBridge.phoshInstalled()
+    @State private var plasmaMobileInstalled = LRRuntimeBridge.plasmaMobileInstalled()
+    @State private var phoshWorking: String?
+    @State private var plasmaMobileWorking: String?
     @State private var working: String?
     @State private var lxqtWorking: String?
     @State private var enlightenmentWorking: String?
@@ -2053,8 +2085,14 @@ private struct DesktopEnvironmentView: View {
                 Text("Wayfire").tag("wayfire").disabled(!wayfireInstalled)
                 Text("Hyprland · Experimental").tag("hyprland").disabled(!hyprlandInstalled)
                 Text("KDE Plasma · Experimental").tag("plasma").disabled(!installed)
+                Text("Phosh · Mobile").tag("phosh").disabled(!phoshInstalled)
+                Text("Plasma Mobile · Mobile").tag("plasma-mobile").disabled(!plasmaMobileInstalled)
             }
-            Text(environment == "hyprland"
+            Text(environment == "phosh"
+                 ? "Phosh, the GNOME-based phone shell from the Librem 5 and postmarketOS: lock-free home screen, app grid, top bar with quick settings, and the squeekboard on-screen keyboard. It runs on the phoc compositor, drawn in software. It works best with the Native resolution in portrait."
+                 : environment == "plasma-mobile"
+                 ? "Plasma Mobile, KDE's phone shell: home screen with app drawer, gesture navigation, action drawer and the Maliit keyboard. It runs on KWin, drawn in software. It works best with the Native resolution and the JIT."
+                 : environment == "hyprland"
                  ? "Hyprland (tiling Wayland compositor with animations and rounded windows; Waybar panel with an Apps launcher, foot terminal). Drawn on the CPU on LinuxRunner's virtual display device, so it is the most demanding desktop. If it is not installed, Open Desktop starts the LinuxRunner Desktop."
                  : environment == "wayfire"
                  ? "Wayfire (Wayland compositor with animations, window previews and workspaces; wf-shell panel and dock, foot terminal) drawn in software inside LinuxRunner's display. If it is not installed, Open Desktop starts the LinuxRunner Desktop."
@@ -2119,7 +2157,49 @@ private struct DesktopEnvironmentView: View {
         } header: { Text("Hyprland · Experimental") } footer: {
             Text("Rendered on the CPU (no GPU acceleration yet); blur is off. Network needed once. The LinuxRunner Desktop stays installed as the fallback.")
         }
-    }.navigationTitle("Desktop Environment").onAppear { installed = LRRuntimeBridge.plasmaInstalled(); lxqtInstalled = LRRuntimeBridge.lxqtInstalled(); enlightenmentInstalled = LRRuntimeBridge.enlightenmentInstalled(); wayfireInstalled = LRRuntimeBridge.wayfireInstalled(); hyprlandInstalled = LRRuntimeBridge.hyprlandInstalled() } }
+        Section {
+            if phoshInstalled { Label("Phosh installed", systemImage: "checkmark.circle") }
+            else {
+                Button(phoshWorking == nil ? "Download & Install Phosh" : "Installing…") { installPhosh() }.disabled(anyWorking || !LRRuntimeBridge.isRunning())
+                if let phoshWorking { Text(phoshWorking).font(.caption).foregroundColor(.secondary) }
+            }
+        } header: { Text("Phosh · Mobile Shell") } footer: {
+            Text("phosh, phoc and squeekboard from the distribution's own packages (Debian 13, Alpine, Arch Linux ARM); network needed once. The LinuxRunner Desktop stays installed as the fallback.")
+        }
+        Section {
+            if plasmaMobileInstalled { Label("Plasma Mobile installed", systemImage: "checkmark.circle") }
+            else {
+                Button(plasmaMobileWorking == nil ? "Download & Install Plasma Mobile" : "Installing…") { installPlasmaMobile() }.disabled(anyWorking || !LRRuntimeBridge.isRunning())
+                if let plasmaMobileWorking { Text(plasmaMobileWorking).font(.caption).foregroundColor(.secondary) }
+            }
+        } header: { Text("Plasma Mobile · Mobile Shell") } footer: {
+            Text("KDE Plasma Mobile from the distribution's own packages (Debian 13: about 600 packages, roughly 1 GB installed); network needed once. The first start takes several minutes without the JIT.")
+        }
+    }.navigationTitle("Desktop Environment")
+    .onChange(of: environment) { picked in
+        // Phone shells are laid out for a phone screen: default them to Native
+        // (follows rotation) unless the user already chose something other than
+        // the stock 960 × 540.
+        guard picked == "phosh" || picked == "plasma-mobile" else { return }
+        let key = "LinuxRunnerDesktop.resolution." + LRRuntimeBridge.activeRootName()
+        if UserDefaults.standard.object(forKey: key) == nil || UserDefaults.standard.integer(forKey: key) == 3 { UserDefaults.standard.set(5, forKey: key) }
+    }
+    .onAppear { phoshInstalled = LRRuntimeBridge.phoshInstalled(); plasmaMobileInstalled = LRRuntimeBridge.plasmaMobileInstalled(); installed = LRRuntimeBridge.plasmaInstalled(); lxqtInstalled = LRRuntimeBridge.lxqtInstalled(); enlightenmentInstalled = LRRuntimeBridge.enlightenmentInstalled(); wayfireInstalled = LRRuntimeBridge.wayfireInstalled(); hyprlandInstalled = LRRuntimeBridge.hyprlandInstalled() } }
+    private var anyWorking: Bool { phoshWorking != nil || plasmaMobileWorking != nil || hyprlandWorking != nil || wayfireWorking != nil || enlightenmentWorking != nil || lxqtWorking != nil || working != nil }
+    private func installPhosh() {
+        failure = nil; phoshWorking = "Starting"
+        LRRuntimeBridge.installPhosh({ phoshWorking = $0 }) { error in
+            phoshWorking = nil; phoshInstalled = LRRuntimeBridge.phoshInstalled()
+            if let error { failure = error.localizedDescription } else if phoshInstalled { environment = "phosh" }
+        }
+    }
+    private func installPlasmaMobile() {
+        failure = nil; plasmaMobileWorking = "Starting"
+        LRRuntimeBridge.installPlasmaMobile({ plasmaMobileWorking = $0 }) { error in
+            plasmaMobileWorking = nil; plasmaMobileInstalled = LRRuntimeBridge.plasmaMobileInstalled()
+            if let error { failure = error.localizedDescription } else if plasmaMobileInstalled { environment = "plasma-mobile" }
+        }
+    }
     private func installHyprland() {
         failure = nil; hyprlandWorking = "Starting"
         LRRuntimeBridge.installHyprland({ hyprlandWorking = $0 }) { error in

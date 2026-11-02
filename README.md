@@ -16,6 +16,13 @@
   <a href="docs/TROUBLESHOOTING.md">Help</a>
 </p>
 
+> **This is a fork** ([Yaryk007/LinuxRunner](https://github.com/Yaryk007/LinuxRunner)) of [mxhm11cr/LinuxRunner](https://github.com/mxhm11cr/LinuxRunner) with:
+>
+> - **JIT that no longer freezes on iOS 26.** The StikDebug region is claimed the moment the debugger attaches, then the debugger is detached at once. Upstream asked for it later, when StikDebug was already suspended, so the app hung. The classic path is skipped on TXM devices. The JIT fault handler is installed in the app, and there are a JIT safe mode toggle and a reset for methods disabled after a crash (Settings › Advanced › Execution Engine). Start LinuxRunner from StikDebug with the **universal** script.
+> - **Native and Custom resolutions.** Native is the device's real pixel resolution, optionally at 75% or 50%. When you rotate the device, the running X11 desktop switches between portrait and landscape live (Xvfb RandR). Custom accepts any size up to 4096 × 4096 (Settings › Desktop › Resolution & Viewer Preferences).
+> - **Mobile desktops.** Phosh (phoc + squeekboard) and Plasma Mobile (KWin + Maliit) download and install from the distribution's packages: Settings › Desktop Environment, or the setup wizard.
+> - CI: `.github/workflows/build-ipa.yml` builds an unsigned JIT-capable IPA (bundle ID `com.yaryk007.linuxrunner`, with `get-task-allow` so StikDebug can attach).
+
 LinuxRunner brings ARM64 Linux userspace to iPhone and iPad through a custom instruction interpreter, an optional JIT engine and a Linux compatibility layer. Run Linux applications, explore desktop environments and take your workspace to an external display.
 
 **No jailbreak. JIT is optional.** LinuxRunner executes Linux userspace programs; it does not boot a Linux kernel or use a full-system virtual machine.

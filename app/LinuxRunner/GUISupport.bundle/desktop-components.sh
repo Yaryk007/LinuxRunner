@@ -13,7 +13,14 @@ base="$PWD/desktop"
 # desktop starts instead, so Open Desktop keeps working.
 environment=${LR_DESKTOP_ENVIRONMENT:-}
 [ -n "$environment" ] && [ "$environment" != linuxrunner ] || environment=$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/linuxrunner/desktop-environment" 2>/dev/null || echo linuxrunner)
-case "$environment" in plasma|lxqt|enlightenment|wayfire|hyprland) ;; *) environment=linuxrunner;; esac
+case "$environment" in plasma|lxqt|enlightenment|wayfire|hyprland|phosh|plasma-mobile) ;; *) environment=linuxrunner;; esac
+# LinuxRunner fork: mobile shells (Phosh on phoc, Plasma Mobile on KWin), both
+# nested in this session's X server like Wayfire. Best with Native resolution.
+phosh_bin=
+for c in /usr/libexec/phosh /usr/lib/phosh/phosh /usr/lib/phosh; do [ -f "$c" ] && [ -x "$c" ] && { phosh_bin=$c; break; }; done
+[ -n "$phosh_bin" ] || phosh_bin=$(command -v phosh 2>/dev/null || true)
+if [ "$environment" = phosh ] && ! { command -v phoc >/dev/null && [ -n "$phosh_bin" ]; }; then echo 'DESKTOP_STARTUP: phosh=not-installed; starting the LinuxRunner desktop (Settings › Desktop Environment › Install Phosh)'; environment=linuxrunner; fi
+if [ "$environment" = plasma-mobile ] && ! { command -v startplasma-wayland >/dev/null && command -v kwin_wayland >/dev/null && [ -d /usr/share/plasma/shells/org.kde.plasma.mobileshell ]; }; then echo 'DESKTOP_STARTUP: plasma-mobile=not-installed; starting the LinuxRunner desktop (Settings › Desktop Environment › Install Plasma Mobile)'; environment=linuxrunner; fi
 if [ "$environment" = lxqt ] && ! command -v startlxqt >/dev/null; then echo 'DESKTOP_STARTUP: lxqt=not-installed; starting the LinuxRunner desktop (Settings › Desktop Environment › Install LXQt)'; environment=linuxrunner; fi
 if [ "$environment" = enlightenment ] && ! command -v enlightenment_start >/dev/null; then echo 'DESKTOP_STARTUP: enlightenment=not-installed; starting the LinuxRunner desktop (Settings › Desktop Environment › Install Enlightenment)'; environment=linuxrunner; fi
 if [ "$environment" = wayfire ] && ! command -v wayfire >/dev/null; then echo 'DESKTOP_STARTUP: wayfire=not-installed; starting the LinuxRunner desktop (Settings › Desktop Environment › Install Wayfire)'; environment=linuxrunner; fi
@@ -45,7 +52,7 @@ publish_wayland() {
  { grep -v '^WAYLAND_DISPLAY=' "$env_file"; echo "WAYLAND_DISPLAY=$1"; } > "$env_file.new" && chmod 600 "$env_file.new" && mv "$env_file.new" "$env_file" &&
   echo "DESKTOP_STARTUP: wayland socket published for launched programs ($1)"
 }
-component_name() { [ "$environment" != plasma ] || { echo "Plasma session (plasma.log)"; return; }; [ "$environment" != lxqt ] || { echo "LXQt session (lxqt.log)"; return; }; [ "$environment" != enlightenment ] || { echo "Enlightenment (enlightenment.log)"; return; }; [ "$environment" != wayfire ] || { echo "Wayfire (wayfire.log)"; return; }; [ "$environment" != hyprland ] || { case "$1" in "$panel") echo "KMS display bridge (kms-bridge.log)";; *) echo "Hyprland (hyprland.log)";; esac; return; }; case "$1" in "$wm") echo "window manager (wm.log)";; "$panel") echo "panel (panel.log)";; "$surface") echo "desktop surface (desktop.log)";; *) echo unknown;; esac; }
+component_name() { [ "$environment" != plasma ] || { echo "Plasma session (plasma.log)"; return; }; [ "$environment" != phosh ] || { echo "Phosh (phosh.log)"; return; }; [ "$environment" != plasma-mobile ] || { echo "Plasma Mobile (plasma-mobile.log)"; return; }; [ "$environment" != lxqt ] || { echo "LXQt session (lxqt.log)"; return; }; [ "$environment" != enlightenment ] || { echo "Enlightenment (enlightenment.log)"; return; }; [ "$environment" != wayfire ] || { echo "Wayfire (wayfire.log)"; return; }; [ "$environment" != hyprland ] || { case "$1" in "$panel") echo "KMS display bridge (kms-bridge.log)";; *) echo "Hyprland (hyprland.log)";; esac; return; }; case "$1" in "$wm") echo "window manager (wm.log)";; "$panel") echo "panel (panel.log)";; "$surface") echo "desktop surface (desktop.log)";; *) echo unknown;; esac; }
 cleanup() { trap - EXIT; for pid in "$surface" "$panel" "$wm" "$conf"; do [ -z "$pid" ] || kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 if [ "$environment" = plasma ]; then
@@ -239,6 +246,61 @@ WF_SHELL_INI
  fi
  limit=600
  echo "DESKTOP_STARTUP: environment=wayfire session=$wm output=${geometry:-unknown} renderer=$([ "${wf_gpu:-0}" = 1 ] && echo virgl || echo pixman)"
+elif [ "$environment" = phosh ] || [ "$environment" = plasma-mobile ]; then
+ # Mobile shells, nested in this X server: one full-screen window (wlroots' or
+ # KWin's X11 backend, software rendering). The window follows the X screen
+ # when the device rotates (session.sh resizes it with the Native resolution).
+ geometry=$(xwininfo -root 2>/dev/null | awk '/-geometry/{split($2,g,"+"); print g[1]}')
+ gw=${geometry%x*}; gh=${geometry#*x}; [ -n "$gw" ] && [ -n "$gh" ] || { gw=720; gh=1440; }
+ short=$gw; [ "$gh" -ge "$short" ] || short=$gh
+ # Phone-sized UI: about 400 logical pixels across the short side.
+ scale=$(( (short + 200) / 400 )); [ "$scale" -ge 1 ] || scale=1; [ "$scale" -le 4 ] || scale=4
+ case "${LANG:-}" in *UTF-8*|*utf8*) ;; *) export LANG=C.UTF-8;; esac
+ # Wayland sockets: a short runtime directory (108-byte socket path limit).
+ short_runtime="/tmp/lrm-$(id -u)"
+ if mkdir -p -m 700 "$short_runtime" 2>/dev/null && [ -O "$short_runtime" ] && [ ! -L "$short_runtime" ]; then
+  chmod 700 "$short_runtime"; rm -rf "$short_runtime"/wayland-*; export XDG_RUNTIME_DIR="$short_runtime"; fi
+ export GSK_RENDERER=cairo GDK_BACKEND=wayland
+ if [ "$environment" = phosh ]; then
+  export XDG_CURRENT_DESKTOP=Phosh:GNOME XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=phosh DESKTOP_SESSION=phosh
+  export WLR_BACKENDS=x11 WLR_RENDERER=pixman WLR_X11_OUTPUTS=1 WLR_NO_HARDWARE_CURSORS=1
+  phoc_config="${XDG_CONFIG_HOME:-$HOME/.config}/linuxrunner/phoc.ini"
+  mkdir -p "$(dirname "$phoc_config")"
+  { [ ! -f /usr/share/phosh/phoc.ini ] || awk '/^\[output:/{skip=1;next} /^\[/{skip=0} !skip' /usr/share/phosh/phoc.ini
+    printf '\n[output:X11-1]\n# Managed by LinuxRunner: phone-sized UI on the session display.\nmode = %sx%s\nscale = %s\n' "$gw" "$gh" "$scale"; } > "$phoc_config"
+  # Phosh's lock screen asks for the account password: start unlocked (iOS
+  # locks the device). squeekboard is the on-screen keyboard.
+  phoc -C "$phoc_config" -E "$phosh_bin --unlocked" > "$session/phosh.log" 2>&1 & wm=$!; panel=$wm; surface=$wm
+  ( i=0
+    until socket=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep -m1 '^wayland-[0-9]*$') && [ -S "$XDG_RUNTIME_DIR/$socket" ]; do
+     i=$((i+1)); [ "$i" -lt 600 ] || exit 0; sleep .5; done
+    publish_wayland "$XDG_RUNTIME_DIR/$socket"
+    ! command -v squeekboard >/dev/null || WAYLAND_DISPLAY=$socket squeekboard >> "$session/phosh.log" 2>&1 ) >> "$session/application.log" 2>&1 &
+  limit=900
+  echo "DESKTOP_STARTUP: environment=phosh session=$wm output=${gw}x${gh} scale=$scale renderer=pixman"
+ else
+  export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_TYPE=wayland KDE_FULL_SESSION=true KDE_SESSION_VERSION=6 DESKTOP_SESSION=plasma-mobile
+  # KWin picks its X11 windowed backend because DISPLAY is set; QPainter
+  # compositing and software Qt Quick (no GPU).
+  export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software KWIN_XKB_DEFAULT_KEYMAP=1
+  export QT_QPA_PLATFORMTHEME=KDE QT_QUICK_CONTROLS_STYLE=org.kde.breeze QT_QUICK_CONTROLS_MOBILE=true
+  export PLASMA_PLATFORM=phone:handset PLASMA_DEFAULT_SHELL=org.kde.plasma.mobileshell PLASMA_INTEGRATION_USE_PORTAL=1
+  export XDG_CONFIG_DIRS="$HOME/.config/plasma-mobile:/etc/xdg:${XDG_CONFIG_DIRS:-}"
+  unset QT_QPA_PLATFORM
+  plasma_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+  if mkdir -p "$plasma_config" && [ ! -e "$plasma_config/kscreenlockerrc" ]; then
+   printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > "$plasma_config/kscreenlockerrc"; fi
+  ! command -v plasma-mobile-envmanager >/dev/null || QT_QPA_PLATFORM=offscreen plasma-mobile-envmanager --apply-settings > "$session/plasma-mobile-env.log" 2>&1 || true
+  im=; ! command -v maliit-keyboard >/dev/null || im="--inputmethod maliit-keyboard"
+  startplasma-wayland --xwayland --width "$gw" --height "$gh" --scale "$scale" $im > "$session/plasma-mobile.log" 2>&1 & wm=$!; panel=$wm; surface=$wm
+  ( i=0
+    until socket=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep -m1 '^wayland-[0-9]*$') && [ -S "$XDG_RUNTIME_DIR/$socket" ]; do
+     i=$((i+1)); [ "$i" -lt 600 ] || exit 0; sleep .5; done
+    publish_wayland "$XDG_RUNTIME_DIR/$socket" ) >> "$session/application.log" 2>&1 &
+  limit=1200   # Plasma needs minutes under the interpreter; far less with the JIT
+  echo "DESKTOP_STARTUP: environment=plasma-mobile session=$wm output=${gw}x${gh} scale=$scale renderer=qpainter"
+ fi
+ integrated=1
 elif [ "$environment" = hyprland ]; then
  # Hyprland draws (GLES on llvmpipe, no GPU) to LinuxRunner's software KMS
  # device through seatd; lr-kms-bridge shows that output in this X server's
@@ -387,7 +449,7 @@ write_degraded() {
 supervise() {
  # Desktops that are one process tree end with it; Hyprland's display bridge
  # alone is restarted (a few times) while Hyprland runs.
- case "$environment" in plasma|lxqt|enlightenment|wayfire|hyprland)
+ case "$environment" in plasma|lxqt|enlightenment|wayfire|hyprland|phosh|plasma-mobile)
   kill -0 "$wm" 2>/dev/null || { echo "$1: component_exited name=$(component_name "$wm") pid=$wm"; exit 1; }
   if [ "$environment" = hyprland ] && [ -n "$panel" ] && ! kill -0 "$panel" 2>/dev/null; then
    bridge_restarts=$((${bridge_restarts:-0} + 1))
@@ -427,7 +489,7 @@ nested_output_mapped() {
 }
 desktop_ready() {
  ./desktop-probe > "$session/desktop-state.probe" || return 1
- case "$environment" in wayfire|hyprland) ! nested_output_mapped || echo wm=1 >> "$session/desktop-state.probe";; esac
+ case "$environment" in wayfire|hyprland|phosh|plasma-mobile) ! nested_output_mapped || echo wm=1 >> "$session/desktop-state.probe";; esac
  awk -F= -v failed=" $failed " -v integrated="$integrated" '{ v[$1] = $2 }
   END { complete = v["wm"] + 0 > 0 && (integrated || (v["panel"] + 0 > 0 && v["surface"] + 0 > 0)) && failed == "  "; ok = v["wm"] + 0 > 0 && (integrated || ((v["panel"] + 0 > 0 || index(failed, " panel ")) && (v["surface"] + 0 > 0 || index(failed, " surface "))))
         if (v["root_geometry"] != "") printf "root_geometry=%s\npanel_geometry=%s\nsurface_geometry=%s\n", v["root_geometry"], v["panel_geometry"], v["surface_geometry"];

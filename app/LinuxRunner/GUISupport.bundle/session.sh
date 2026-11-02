@@ -175,7 +175,7 @@ export LR_GUI_GPU_MODE="$gpu_mode" LR_GUI_SESSION_DIR="$session"
 # Desktop environment chosen in Settings › Desktop (desktop mode): linuxrunner or plasma (experimental).
 desktop_environment=linuxrunner
 [ ! -f "$session/desktop-environment" ] || desktop_environment=$(cat "$session/desktop-environment")
-case "$desktop_environment" in linuxrunner|plasma|lxqt|enlightenment|wayfire|hyprland) ;; *) desktop_environment=linuxrunner;; esac
+case "$desktop_environment" in linuxrunner|plasma|lxqt|enlightenment|wayfire|hyprland|phosh|plasma-mobile) ;; *) desktop_environment=linuxrunner;; esac
 export LR_DESKTOP_ENVIRONMENT="$desktop_environment"
 glx_mode=off
 [ "$distro" != debian ] || glx_mode=software
@@ -198,7 +198,8 @@ esac
 echo "GUI_CAPTURE: shared-images=$shm_mode"
 # Wayfire draws into this X server through MIT-SHM (wlroots' X11 backend with its
 # software renderer); x11vnc keeps the capture path chosen above.
-[ "$mode" != desktop ] || [ "$desktop_environment" != wayfire ] || shm_switch=+extension
+# Phosh (phoc, wlroots) and Plasma Mobile (KWin's X11 backend) draw the same way.
+case "$mode:$desktop_environment" in desktop:wayfire|desktop:phosh|desktop:plasma-mobile) shm_switch=+extension;; esac
 export XDG_SESSION_TYPE=x11
 export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-xcb}
 export QT_FORCE_STDERR_LOGGING=${QT_FORCE_STDERR_LOGGING:-1}
@@ -208,23 +209,70 @@ export QT_OPENGL=${QT_OPENGL:-software} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOF
 width=640 height=480
 if [ -f "$session/geometry" ]; then
     geometry=$(cat "$session/geometry")
-    # A preset or the app's "Fit Screen" size: even WxH within 320x240..2560x1600.
+    # A preset, "Fit Screen", "Native" or a custom size: even WxH within
+    # 320x240..4096x4096 (LinuxRunner fork: native iPhone/iPad resolutions).
     case "$geometry" in ''|*[!0-9x]*|x*|*x|*x*x*) echo 'GUI_SESSION: invalid display geometry'; exit 2;; esac
     width=${geometry%x*};height=${geometry#*x}
-    if [ "$width" -lt 320 ] || [ "$width" -gt 2560 ] || [ "$height" -lt 240 ] || [ "$height" -gt 1600 ] || [ $((width % 2)) -ne 0 ] || [ $((height % 2)) -ne 0 ]; then echo 'GUI_SESSION: invalid display geometry'; exit 2; fi
+    if [ "$width" -lt 320 ] || [ "$width" -gt 4096 ] || [ "$height" -lt 240 ] || [ "$height" -gt 4096 ] || [ $((width % 2)) -ne 0 ] || [ $((height % 2)) -ne 0 ]; then echo 'GUI_SESSION: invalid display geometry'; exit 2; fi
 fi
+# Live resize (LinuxRunner fork): with "Native" the app asks for a new size when
+# the device rotates. Xvfb's RandR can shrink and grow the screen up to the size
+# it started with, so it starts as a square of the longer side and is set to
+# the requested size right away. KMS compositors keep a fixed size.
+resizable=no
+if [ -f "$session/resizable" ] && command -v xrandr >/dev/null; then
+    case "$mode:$(cat "$session/desktop-environment" 2>/dev/null)" in
+        desktop:hyprland) ;;
+        desktop:wayfire) [ -c /dev/dri/card1 ] || resizable=yes;;
+        *) resizable=yes;;
+    esac
+fi
+lr_resize() {
+    # $1x$2: a user mode on Xvfb's single output, then the screen to that size.
+    rw=$1 rh=$2 output=$(xrandr -q 2>/dev/null | awk '/ connected/{print $1; exit}')
+    [ -n "$output" ] || return 1
+    name="lr-${rw}x${rh}"
+    xrandr -q | grep -q "^   $name " || {
+        xrandr --newmode "$name" 60.00 "$rw" "$rw" "$rw" "$rw" "$rh" "$rh" "$rh" "$rh" 2>/dev/null || true
+        xrandr --addmode "$output" "$name" 2>/dev/null || return 1
+    }
+    xrandr --output "$output" --mode "$name" --fb "${rw}x${rh}" 2>>"$session/resize.log"
+}
+lr_fit_windows() {
+    # Nested compositors (Wayfire, Phosh, Plasma Mobile) draw into one window
+    # that covers the screen; follow the new size. Built once per account.
+    fit_dir="${XDG_CACHE_HOME:-$HOME/.cache}/linuxrunner"
+    fit="$fit_dir/fit-windows-$(sha256sum fit-windows.c | cut -c1-16)"
+    [ -x "$fit" ] || { mkdir -p "$fit_dir" && gcc -O2 fit-windows.c -lX11 -o "$fit.new" && mv "$fit.new" "$fit"; } || return 0
+    "$fit" "$1" "$2" "$3" "$4" >> "$session/resize.log" 2>&1 || true
+}
 export XAUTHORITY="$session/authority"
 umask 077
 xauth -f "$XAUTHORITY" add "$DISPLAY" . "$(cat "$session/cookie")"
 echo "GUI_SESSION: root=${LINUXRUNNER_ENVIRONMENT:-current} distribution=$distro DISPLAY=$DISPLAY geometry=${width}x${height} backend=xvfb-rfb interpreter-baseline"
 echo "GUI_SESSION: starting X.Org software display, ${width}x${height}, no JIT"
-Xvfb "$DISPLAY" -screen 0 "${width}x${height}x24" -nolisten tcp -auth "$XAUTHORITY" "$shm_switch" MIT-SHM "$glx_switch" GLX > "$session/xvfb.log" 2>&1 & xpid=$!
-i=0
-while [ ! -S "/tmp/.X11-unix/X$display" ]; do
-    [ ! -f "$session/stop" ] || exit 0
-    kill -0 "$xpid" 2>/dev/null || { echo 'GUI_SESSION: X server exited'; cat "$session/xvfb.log"; exit 4; }
-    i=$((i+1)); [ "$i" -lt 100 ] || { echo 'GUI_SESSION: X server timeout'; exit 5; }; sleep .1
-done
+start_xvfb() {
+    Xvfb "$DISPLAY" -screen 0 "${1}x${2}x24" -nolisten tcp -auth "$XAUTHORITY" "$shm_switch" MIT-SHM "$glx_switch" GLX > "$session/xvfb.log" 2>&1 & xpid=$!
+    i=0
+    while [ ! -S "/tmp/.X11-unix/X$display" ]; do
+        [ ! -f "$session/stop" ] || exit 0
+        kill -0 "$xpid" 2>/dev/null || { echo 'GUI_SESSION: X server exited'; cat "$session/xvfb.log"; exit 4; }
+        i=$((i+1)); [ "$i" -lt 100 ] || { echo 'GUI_SESSION: X server timeout'; exit 5; }; sleep .1
+    done
+}
+if [ "$resizable" = yes ]; then
+    side=$width; [ "$height" -le "$side" ] || side=$height
+    start_xvfb "$side" "$side"
+    if lr_resize "$width" "$height"; then echo "GUI_SESSION: resizable=yes max=${side}x${side}"
+    else
+        echo 'GUI_SESSION: resizable=no (Xvfb RandR refused a mode); fixed size'
+        kill "$xpid" 2>/dev/null; wait "$xpid" 2>/dev/null; rm -f "/tmp/.X11-unix/X$display"
+        resizable=no; start_xvfb "$width" "$height"
+    fi
+else
+    start_xvfb "$width" "$height"
+fi
+echo "$resizable" > "$session/resizable-state"
 echo "GUI_SESSION: stage=x11-ready socket=/tmp/.X11-unix/X$display polls=$i"
 if [ "$mode" != desktop ]; then
 # Session-wide focus policy for all X11 clients; no app-name/key special cases.
@@ -339,7 +387,9 @@ case "$mode:$(cat "$session/desktop-environment" 2>/dev/null)" in
     desktop:wayfire) if [ -c /dev/dri/card1 ] && command -v wayfire >/dev/null; then vnc_cursor_option=-nocursor; fi;;
 esac
 [ -z "$vnc_cursor_option" ] || echo 'GUI_SESSION: pointer=compositor (x11vnc draws none)'
-x11vnc -norc -display "$DISPLAY" -auth "$XAUTHORITY" -localhost -no6 -rfbport "$port" -passwdfile "$session/password" $vnc_lifetime $vnc_shm_option $vnc_timing_options -noxrecord -noscr -nosel -noclipboard -nocursorshape $vnc_cursor_option -nolookup $input_option "$xkb" > "$session/display.log" 2>&1 & vpid=$!
+vnc_resize_option=
+[ "$resizable" != yes ] || vnc_resize_option="-xrandr resize"
+x11vnc -norc $vnc_resize_option -display "$DISPLAY" -auth "$XAUTHORITY" -localhost -no6 -rfbport "$port" -passwdfile "$session/password" $vnc_lifetime $vnc_shm_option $vnc_timing_options -noxrecord -noscr -nosel -noclipboard -nocursorshape $vnc_cursor_option -nolookup $input_option "$xkb" > "$session/display.log" 2>&1 & vpid=$!
 echo "GUI_SESSION: stage=vnc-started port=$port"
 if [ "$mode" = test ]; then ./gui-test > "$session/application.log" 2>&1 &
 elif [ "$mode" = xterm ]; then xterm -geometry 80x24+0+0 -fn fixed -xrm 'XTerm*renderFont: false' > "$session/application.log" 2>&1 &
@@ -373,6 +423,23 @@ application_live() {
     ps -o pgid,stat | awk -v group="$appgroup" '$1 == group && $2 !~ /^Z/ { alive=1 } END { exit !alive }'
 }
 # Disconnect or the last owned app process exiting tears down this session.
-while [ ! -f "$session/stop" ] && application_live && kill -0 "$vpid" 2>/dev/null && { [ "$mode" = desktop ] || kill -0 "$wpid" 2>/dev/null; }; do sleep .2; done
+while [ ! -f "$session/stop" ] && application_live && kill -0 "$vpid" 2>/dev/null && { [ "$mode" = desktop ] || kill -0 "$wpid" 2>/dev/null; }; do
+    # Rotation with "Native": the app writes the new size here.
+    if [ "$resizable" = yes ] && [ -f "$session/resize-request" ]; then
+        request=$(cat "$session/resize-request"); rm -f "$session/resize-request"
+        case "$request" in ''|*[!0-9x]*|x*|*x|*x*x*) request=;; esac
+        if [ -n "$request" ]; then
+            rw=${request%x*}; rh=${request#*x}
+            if [ "$rw" -ge 320 ] && [ "$rh" -ge 240 ] && [ "$rw" -le "$side" ] && [ "$rh" -le "$side" ] && [ $((rw % 2)) -eq 0 ] && [ $((rh % 2)) -eq 0 ]; then
+                if lr_resize "$rw" "$rh"; then
+                    lr_fit_windows "$width" "$height" "$rw" "$rh"
+                    width=$rw; height=$rh; echo "${rw}x${rh}" > "$session/resize-result"
+                    echo "GUI_SESSION: resized=${rw}x${rh}"
+                else echo "GUI_SESSION: resize ${request} failed (see resize.log)"; fi
+            fi
+        fi
+    fi
+    sleep .2
+done
 if application_live; then echo 'GUI_SESSION: display disconnected'
 else echo 'GUI_SESSION: application process group ended'; fi

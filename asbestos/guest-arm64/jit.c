@@ -197,24 +197,66 @@ static bool ios_region_verify(void) {
     return ((int (*)(void)) (void *) code)() == 42;
 }
 
+// LinuxRunner fork: the TXM region is claimed as early as possible, from the
+// moment a debugger is seen attached, never later on demand. StikDebug runs its
+// script only while it is itself in the foreground; a brk issued once the user
+// switched back to LinuxRunner (the old "Activate JIT Now" / foreground retry)
+// waits for a suspended debugger forever, which froze the app. The claim
+// prepares the region, makes its writable alias and detaches at once, so no
+// later signal (guest faults, SIGPIPE) ever stops at a debugger either.
+static _Atomic int txm_claim_state;   // 0 none, 1 in progress, 2 claimed, 3 failed
+static uint8_t *txm_rx;
+static intptr_t txm_delta;
+static char txm_claim_detail[160];
+
+int jit_ios_claim_txm(size_t size) {
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&txm_claim_state, &expected, 1))
+        return atomic_load(&txm_claim_state) == 2 ? 0 : -1;
+    if (size < REGION_SIZE) size = REGION_SIZE;
+    uint8_t *rx = jit26_prepare_region(NULL, size);
+    vm_address_t rw = 0;
+    vm_prot_t cur, max;
+    bool ok = rx && vm_remap(mach_task_self(), &rw, REGION_SIZE, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                             (vm_address_t) rx, false, &cur, &max, VM_INHERIT_NONE) == KERN_SUCCESS &&
+              mprotect((void *) rw, REGION_SIZE, PROT_READ | PROT_WRITE) == 0;
+    jit26_detach();
+    if (!ok) {
+        snprintf(txm_claim_detail, sizeof txm_claim_detail, "%s",
+                 rx ? "the prepared region could not get a writable alias" : "the debugger did not prepare a region (is the universal script selected in StikDebug?)");
+        atomic_store(&txm_claim_state, 3);
+        return -1;
+    }
+    txm_rx = rx;
+    txm_delta = (intptr_t) rw - (intptr_t) rx;
+    snprintf(txm_claim_detail, sizeof txm_claim_detail, "claimed at attach");
+    atomic_store(&txm_claim_state, 2);
+    return 0;
+}
+
+int jit_ios_txm_claim_state(char *detail, size_t size) {
+    if (detail && size) snprintf(detail, size, "%s", txm_claim_detail);
+    return atomic_load(&txm_claim_state);
+}
+
 int jit_ios_acquire(bool txm, char *detail, size_t size) {
     if (atomic_load(&ios_region_ready)) { snprintf(detail, size, "already active"); return 0; }
     if (region) { snprintf(detail, size, "a previous attempt left an unverified region"); return -1; }
-    if (!txm) {
+    if (txm && atomic_load(&txm_claim_state) == 2) {
+        region = txm_rx;
+        rw_delta = txm_delta;
+        dual_map = true;
+    } else if (txm && atomic_load(&txm_claim_state) != 0) {
+        snprintf(detail, size, "%s", atomic_load(&txm_claim_state) == 1 ? "claim still in progress" : txm_claim_detail);
+        return -1;
+    } else if (!txm) {
         // Without TXM, a debugged process may map an executable alias: the
         // mprotect below is iOS's own permission check.
         if (!map_dual()) { snprintf(detail, size, "iOS refused executable memory (no debugger has attached to this process)"); return -1; }
     } else {
-        uint8_t *rx = jit26_prepare_region(NULL, REGION_SIZE);
-        vm_address_t rw = 0;
-        vm_prot_t cur, max;
-        bool ok = rx && vm_remap(mach_task_self(), &rw, REGION_SIZE, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
-                                 (vm_address_t) rx, false, &cur, &max, VM_INHERIT_NONE) == KERN_SUCCESS &&
-                  mprotect((void *) rw, REGION_SIZE, PROT_READ | PROT_WRITE) == 0;
-        jit26_detach();
-        if (!ok) { snprintf(detail, size, rx ? "the prepared region could not get a writable alias" : "the debugger did not prepare a region"); return -1; }
-        region = rx;
-        rw_delta = (intptr_t) rw - (intptr_t) rx;
+        if (jit_ios_claim_txm(REGION_SIZE) != 0) { snprintf(detail, size, "%s", txm_claim_detail); return -1; }
+        region = txm_rx;
+        rw_delta = txm_delta;
         dual_map = true;
     }
     if (!ios_region_verify()) { snprintf(detail, size, "generated code did not run correctly"); return -1; }

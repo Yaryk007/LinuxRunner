@@ -5,7 +5,7 @@
 #include <stdio.h>
 int main(void){
     size_t bytes=0;assert(lr_rfb_dimensions(640,480,&bytes)&&bytes==1228800);
-    assert(!lr_rfb_dimensions(0,1,&bytes));assert(!lr_rfb_dimensions(2561,1,&bytes));assert(!lr_rfb_dimensions(1,1601,&bytes));
+    assert(!lr_rfb_dimensions(0,1,&bytes));assert(!lr_rfb_dimensions(4097,1,&bytes));assert(!lr_rfb_dimensions(1,4097,&bytes));assert(lr_rfb_dimensions(1320,2868,&bytes));
     assert(lr_rfb_dimensions(2560,1600,&bytes)&&bytes==16384000);assert(lr_rfb_dimensions(824,1200,&bytes));  // Fit Screen / external displays
     uint8_t storage[4*4*4+32];memset(storage,0xa5,sizeof storage);uint8_t source[16];memset(source,0x42,sizeof source);
     assert(lr_rfb_apply_raw(storage+16,4,4,1,1,2,2,source,16));

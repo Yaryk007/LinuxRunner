@@ -23,7 +23,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 helper_key() { { cat support-version; sha256sum "$@"; } | sha256sum | awk '{print $1}'; }
 
 gui_missing() {
-    for c in Xvfb x11vnc xauth fc-match gcc pkg-config readelf dbus-daemon; do have "$c" || return 0; done
+    # xrandr: live resize with the Native resolution (LinuxRunner fork).
+    for c in Xvfb x11vnc xauth fc-match gcc pkg-config readelf dbus-daemon xrandr; do have "$c" || return 0; done
     pkg-config --exists x11 xcb 2>/dev/null || return 0
     [ -x focus-manager ] && [ -x gui-test ] || return 0
     return 1
@@ -58,6 +59,13 @@ accounts_missing() {
     return 1
 }
 
+# LinuxRunner fork: mobile shells.
+phosh_binary() {
+    for c in /usr/libexec/phosh /usr/lib/phosh/phosh /usr/lib/phosh; do [ -f "$c" ] && [ -x "$c" ] && { echo "$c"; return 0; }; done
+    command -v phosh 2>/dev/null
+}
+phosh_present() { have phoc && [ -n "$(phosh_binary)" ]; }
+plasma_mobile_present() { have startplasma-wayland && have kwin_wayland && [ -d /usr/share/plasma/shells/org.kde.plasma.mobileshell ]; }
 check() {
     missing= optional=
     if gui_missing || gui_helpers_stale; then missing=gui; fi
@@ -73,6 +81,8 @@ check() {
       if have enlightenment_start && have terminology; then echo enlightenment=installed; else echo enlightenment=missing; fi
       if have wayfire && have wf-panel && have foot; then echo wayfire=installed; else echo wayfire=missing; fi
       if have Hyprland && have waybar && have fuzzel && have seatd; then echo hyprland=installed; else echo hyprland=missing; fi
+      if phosh_present; then echo phosh=installed; else echo phosh=missing; fi
+      if plasma_mobile_present; then echo plasma-mobile=installed; else echo plasma-mobile=missing; fi
       # Startup timeline (app diagnostics): Debian first start, helper build.
       if [ -e /usr/lib/linuxrunner/initialize-debian.sh ] || [ -e /usr/lib/linuxrunner/initialize-arch.sh ]; then
           if [ -f /var/lib/linuxrunner/initialized ]; then echo first-start=done; else echo first-start=pending; fi
@@ -211,7 +221,7 @@ repair() {
     [ "$(id -u)" = 0 ] || support_fail PROFILE root-required
     if gui_missing; then
         install_packages "X server and display support" busybox procps xvfb x11vnc xauth x11-xserver-utils x11-utils x11-apps libx11-dev libxcb1-dev build-essential pkg-config binutils xterm xfonts-base fonts-dejavu-core fontconfig dbus-daemon dbus-x11 librsvg2-common \
-            -- xvfb x11vnc xclock libx11-dev libxcb-dev build-base pkgconf binutils xterm font-misc-misc font-dejavu fontconfig xauth setxkbmap xmodmap dbus \
+            -- xvfb x11vnc xclock libx11-dev libxcb-dev build-base pkgconf binutils xterm font-misc-misc font-dejavu fontconfig xauth setxkbmap xmodmap xrandr xwininfo dbus \
             -- procps-ng xorg-server-xvfb x11vnc xorg-xauth xorg-xset xorg-xrandr xorg-xprop xorg-xwininfo xorg-xdpyinfo xorg-xsetroot xorg-xmodmap xorg-setxkbmap xorg-xclock libx11 libxcb gcc make pkgconf binutils xterm xorg-fonts-misc ttf-dejavu fontconfig dbus librsvg || support_fail PROFILE gui-packages
         mkdir -p /var/lib/dbus; dbus-uuidgen --ensure 2>/dev/null || true
     fi
@@ -320,6 +330,30 @@ case "$mode" in
         fi
         have wayfire && have wf-panel && have foot || support_fail PROFILE wayfire-missing
         echo 'PROFILE: wayfire=PASS';;
+    phosh)
+        # Phosh (GNOME-based phone shell) on the phoc compositor, nested in the
+        # session's X server with wlroots' software renderer; squeekboard is its
+        # on-screen keyboard. Debian 13, Alpine and Arch Linux ARM package it.
+        repair "${2:-}"
+        if ! phosh_present || ! have squeekboard; then
+            install_packages "Phosh" phosh phoc squeekboard phosh-mobile-tweaks foot xwayland adwaita-icon-theme fonts-cantarell gnome-settings-daemon \
+                -- phosh phoc squeekboard foot xwayland adwaita-icon-theme font-cantarell gnome-settings-daemon \
+                -- phosh phoc squeekboard foot xorg-xwayland adwaita-icon-theme cantarell-fonts gnome-settings-daemon || support_fail PROFILE phosh-packages
+        fi
+        phosh_present || support_fail PROFILE phosh-missing
+        echo 'PROFILE: phosh=PASS';;
+    plasma-mobile)
+        # Plasma Mobile (KDE's phone shell) on KWin's Wayland compositor, nested
+        # in the session's X server (QPainter, software Qt Quick), with the
+        # Maliit on-screen keyboard. Debian 13, Alpine and Arch Linux ARM package it.
+        repair "${2:-}"
+        if ! plasma_mobile_present; then
+            install_packages "Plasma Mobile (about 600 packages)" plasma-mobile plasma-mobile-tweaks kwin-wayland xwayland maliit-keyboard plasma-workspace-wallpapers konsole dbus-x11 \
+                -- plasma-mobile kwin xwayland maliit-keyboard konsole \
+                -- plasma-mobile kwin xorg-xwayland maliit-keyboard konsole || support_fail PROFILE plasma-mobile-packages
+        fi
+        plasma_mobile_present || support_fail PROFILE plasma-mobile-missing
+        echo 'PROFILE: plasma-mobile=PASS';;
     hyprland)
         # Hyprland on LinuxRunner's software KMS device (llvmpipe, no GPU), with
         # Waybar, the fuzzel launcher, the foot terminal and seatd. Arch Linux

@@ -1,0 +1,57 @@
+name: Build IPA
+
+# LinuxRunner fork: JIT-capable IPA (StikDebug attach-time claim, native
+# fault adapter), Native/Custom resolution and the mobile shells. GPU (virgl)
+# stays off here: its ANGLE dependency build does not fit a CI runner.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Pinned submodules
+        run: git submodule update --init --recursive --checkout --depth 1 -- deps/libapps deps/libarchive deps/glslang deps/spirv-cross
+
+      - name: Tools
+        run: |
+          brew install meson ninja lld cmake
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          xcodebuild -version
+
+      - name: Build (JIT-capable, unsigned)
+        env:
+          LINUXRUNNER_JIT: "YES"
+          BUNDLE_ID: com.yaryk007.linuxrunner
+          ARTIFACT_NAME: LinuxRunner-JIT
+          RELEASE_DIR: ${{ github.workspace }}/build/releases
+        run: scripts/build-ipa.sh --unsigned
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LinuxRunner-JIT-ipa
+          path: |
+            build/releases/LinuxRunner-JIT.ipa
+            build/releases/LinuxRunner-JIT.ipa.sha256
+            build/releases/SIGNING-STATUS.txt
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build/releases/archive.log
+          if-no-files-found: ignore

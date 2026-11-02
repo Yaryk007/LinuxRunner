@@ -88,6 +88,13 @@ void LRSetDatalessMaterialization(void);
 + (NSDictionary *)executionBackendStatus;
 + (BOOL)activateJIT:(NSString * _Nullable * _Nullable)detail;
 + (void)prepareExecutionBackendAtLaunch;
+// LinuxRunner fork: claim StikDebug's TXM region as soon as a debugger attaches
+// (call from main() before UIApplicationMain), plus JIT preferences.
++ (void)claimJITAtLaunch;
++ (NSArray<NSString *> *)jitFailedMethods;
++ (void)resetJITFailures;
+@property (class, nonatomic, setter=setJITClaimOnAttach:) BOOL jitClaimOnAttach;
+@property (class, nonatomic, setter=setJITSafeMode:) BOOL jitSafeMode;
 + (void)createEnvironment:(NSString *)root completion:(void (^)(NSError * _Nullable))completion;
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)discoverApplications;
 + (NSArray<NSDictionary *> *)discoverGraphicalApplications;
@@ -132,6 +139,11 @@ void LRSetDatalessMaterialization(void);
 + (BOOL)wayfireInstalled;
 + (void)installHyprland:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion;
 + (BOOL)hyprlandInstalled;
+/// LinuxRunner fork: phone shells, nested in the session's X server.
++ (void)installPhosh:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion;
++ (BOOL)phoshInstalled;
++ (void)installPlasmaMobile:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion;
++ (BOOL)plasmaMobileInstalled;
 /// True while a support installation (account tools, desktop, KDE) runs; a
 /// second one is refused until it finishes.
 + (BOOL)installationRunning;

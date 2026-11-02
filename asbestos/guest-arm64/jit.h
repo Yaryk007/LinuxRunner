@@ -149,6 +149,13 @@ int jit_control(const char *cmd, size_t len);
 // requires its script to be attached. 0 on success; detail says what happened.
 // Translation starts with the next block compiled; never called otherwise.
 int jit_ios_acquire(bool txm, char *detail, size_t size);
+// LinuxRunner fork: claim the TXM region right away (StikDebug's universal
+// script must be attached: P_TRACED). Prepares, aliases and detaches in one go;
+// jit_ios_acquire(true) then adopts it without another brk. Safe to call from
+// any thread, at most one claim per process; 0 on success.
+int jit_ios_claim_txm(size_t size);
+// 0 not attempted, 1 in progress, 2 claimed, 3 failed (detail: why).
+int jit_ios_txm_claim_state(char *detail, size_t size);
 #endif
 #endif
 
