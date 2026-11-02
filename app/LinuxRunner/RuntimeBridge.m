@@ -335,7 +335,9 @@ static NSString *desktopRoot;
     // Opt-in GPU acceleration: guest Mesa's virgl driver on the Apple GPU. If
     // ANGLE/Metal cannot start, the virtio-gpu device stays absent and
     // everything renders in software as before.
-    if ([LRRuntimeBridge.gpuMode isEqual:@"metal"]) {
+    // LinuxRunner fork: Automatic means Metal in GPU builds (Software stays
+    // selectable); a failed start falls back to software rendering.
+    if ([LRRuntimeBridge.gpuMode isEqual:@"metal"] || [LRRuntimeBridge.gpuMode isEqual:@"automatic"]) {
         const struct lr_virgl_backend *virgl = lr_virgl_host_start();
         lr_virgl_install(virgl);
         LRVirglActive = virgl != NULL;
@@ -602,9 +604,9 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
     else if(LRVirglActive){active=@"Metal GPU (virgl) · Experimental";detail=[NSString stringWithFormat:@"virtio-gpu device active · %@",LRVirglStatus?:@"ANGLE/Metal"];}
     else if(LRVirglStatus.length){active=@"Software (fallback)";detail=[NSString stringWithFormat:@"Metal GPU did not start: %@",LRVirglStatus];}
     else if([mode isEqual:@"metal"]){active=@"Software";detail=@"Metal GPU selected · takes effect after LinuxRunner restarts";}
-    else if([mode isEqual:@"automatic"]){active=@"Software";detail=@"Automatic uses software rendering until Metal is validated on iPhone";}
+    else if([mode isEqual:@"automatic"]){active=@"Software";detail=@"Automatic uses the Metal GPU · takes effect after LinuxRunner restarts";}
     else {active=@"Software";detail=@"Software rendering selected";}
-    return @{@"mode":mode,@"active":active,@"detail":detail,@"device":@(LRVirglActive),@"restartNeeded":@([mode isEqual:@"metal"]!=LRVirglActive&&!LRVirglStatus.length)};
+    return @{@"mode":mode,@"active":active,@"detail":detail,@"device":@(LRVirglActive),@"restartNeeded":@(([mode isEqual:@"metal"]||[mode isEqual:@"automatic"])!=LRVirglActive&&!LRVirglStatus.length&&self.virglCompiledIn)};
 }
 + (BOOL)jitCompiledIn {
 #ifdef LINUXRUNNER_JIT_BUILD

@@ -1,8 +1,9 @@
 name: Build IPA
 
-# LinuxRunner fork: JIT-capable IPA (StikDebug attach-time claim, native
-# fault adapter), Native/Custom resolution and the mobile shells. GPU (virgl)
-# stays off here: its ANGLE dependency build does not fit a CI runner.
+# LinuxRunner fork: JIT-capable + Metal GPU (virgl on ANGLE/Metal) IPA,
+# Native/Custom resolution and the mobile shells.
+# ANGLE is the slow part (first run: checkout + build, roughly an hour); its
+# outputs are cached by the pinned revisions, so later runs skip it.
 on:
   push:
     branches: [main]
@@ -12,10 +13,16 @@ concurrency:
   group: ipa-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  VIRGL_REV: e0a1caf3b147bb26dfe524dbb85ded1177e7e49e
+  EPOXY_REV: d1f952c4565c389d82fd1657153e84e050f35b27
+  ANGLE_REV: feebf60fe088ccec3a26a7419d6ac68edf542c7a
+  DEPOT_TOOLS_REV: a20039648c0de69d8156906b18052bd47e9bf230
+
 jobs:
   ipa:
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,13 +33,59 @@ jobs:
 
       - name: Tools
         run: |
-          brew install meson ninja lld cmake
+          brew install meson ninja lld cmake pkgconf
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           xcodebuild -version
+          df -h "$GITHUB_WORKSPACE"
 
-      - name: Build (JIT-capable, unsigned)
+      - name: GPU dependencies cache
+        id: gpucache
+        uses: actions/cache@v4
+        with:
+          path: build/gpu/iphoneos
+          key: gpu-iphoneos-${{ env.ANGLE_REV }}-${{ env.VIRGL_REV }}-${{ env.EPOXY_REV }}-${{ hashFiles('scripts/build-gpu-deps.sh', 'scripts/gpu/**') }}
+
+      - name: Fetch GPU sources (pinned)
+        if: steps.gpucache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          export GPU_DEPS="$RUNNER_TEMP/gpu-deps"; echo "GPU_DEPS=$GPU_DEPS" >> "$GITHUB_ENV"
+          mkdir -p "$GPU_DEPS"
+          pinned() {  # dir url sha: shallow fetch of exactly one commit
+            git init -q "$GPU_DEPS/$1"; git -C "$GPU_DEPS/$1" remote add origin "$2"
+            git -C "$GPU_DEPS/$1" fetch -q --depth 1 origin "$3"; git -C "$GPU_DEPS/$1" checkout -q --detach FETCH_HEAD
+          }
+          pinned depot_tools https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_REV"
+          pinned virglrenderer https://gitlab.freedesktop.org/virgl/virglrenderer.git "$VIRGL_REV"
+          pinned libepoxy https://github.com/anholt/libepoxy.git "$EPOXY_REV"
+          pinned angle https://chromium.googlesource.com/angle/angle.git "$ANGLE_REV"
+          export PATH="$GPU_DEPS/depot_tools:$PATH" DEPOT_TOOLS_UPDATE=0
+          cd "$GPU_DEPS/angle"
+          # Same as ANGLE's scripts/bootstrap.py (in-place checkout), plus iOS deps.
+          cat > .gclient <<'GCLIENT'
+          solutions = [{
+            "name": ".",
+            "url": "https://chromium.googlesource.com/angle/angle.git",
+            "deps_file": "DEPS",
+            "managed": False,
+            "custom_vars": {},
+          }]
+          target_os = ["ios", "mac"]
+          GCLIENT
+          gclient sync --no-history --shallow -j 8
+          df -h "$GPU_DEPS"
+
+      - name: Build GPU dependencies (ANGLE/Metal, libepoxy, virglrenderer)
+        if: steps.gpucache.outputs.cache-hit != 'true'
+        run: |
+          export PATH="$GPU_DEPS/depot_tools:$PATH" DEPOT_TOOLS_UPDATE=0
+          scripts/build-gpu-deps.sh iphoneos
+          rm -rf build/gpu/iphoneos/work
+
+      - name: Build (JIT + Metal GPU, unsigned)
         env:
           LINUXRUNNER_JIT: "YES"
+          LINUXRUNNER_VIRGL: "YES"
           BUNDLE_ID: com.yaryk007.linuxrunner
           ARTIFACT_NAME: LinuxRunner-JIT
           RELEASE_DIR: ${{ github.workspace }}/build/releases

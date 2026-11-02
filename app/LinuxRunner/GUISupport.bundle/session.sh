@@ -52,12 +52,13 @@ if [ "$(id -u)" = 0 ] && [ "$guest_user" != root ]; then
     # Wayfire uses it too, but only with the GPU (virtio-gpu card answering);
     # in software it stays nested in the X server as before.
     kms_desktop=$(cat "$session/desktop-environment" 2>/dev/null)
-    if [ "$mode" = desktop ] && [ "$kms_desktop" = wayfire ] && command -v seatd >/dev/null; then
+    # LinuxRunner fork: Phosh's phoc (wlroots) drives the GPU the same way.
+    if [ "$mode" = desktop ] && { [ "$kms_desktop" = wayfire ] || [ "$kms_desktop" = phosh ]; } && command -v seatd >/dev/null; then
         mkdir -p /dev/dri
         [ -c /dev/dri/card1 ] || mknod -m 660 /dev/dri/card1 c 226 1
-        if (exec 3<>/dev/dri/card1) 2>/dev/null; then kms_desktop=wayfire-gpu; else rm -f /dev/dri/card1; fi
+        if (exec 3<>/dev/dri/card1) 2>/dev/null; then kms_desktop=$kms_desktop-gpu; else rm -f /dev/dri/card1; fi
     fi
-    if [ "$mode" = desktop ] && { [ "$kms_desktop" = hyprland ] || [ "$kms_desktop" = wayfire-gpu ]; } && command -v seatd >/dev/null; then
+    if [ "$mode" = desktop ] && { [ "$kms_desktop" = hyprland ] || [ "$kms_desktop" = wayfire-gpu ] || [ "$kms_desktop" = phosh-gpu ]; } && command -v seatd >/dev/null; then
         mkdir -p /dev/dri /run/udev/data
         [ -c /dev/dri/card0 ] || mknod -m 660 /dev/dri/card0 c 226 0
         [ -c /dev/dri/renderD128 ] || mknod -m 666 /dev/dri/renderD128 c 226 128
@@ -223,7 +224,7 @@ resizable=no
 if [ -f "$session/resizable" ] && command -v xrandr >/dev/null; then
     case "$mode:$(cat "$session/desktop-environment" 2>/dev/null)" in
         desktop:hyprland) ;;
-        desktop:wayfire) [ -c /dev/dri/card1 ] || resizable=yes;;
+        desktop:wayfire|desktop:phosh) [ -c /dev/dri/card1 ] || resizable=yes;;
         *) resizable=yes;;
     esac
 fi
@@ -385,6 +386,7 @@ vnc_cursor_option=
 case "$mode:$(cat "$session/desktop-environment" 2>/dev/null)" in
     desktop:hyprland) if command -v Hyprland >/dev/null && [ -c /dev/dri/card0 ]; then vnc_cursor_option=-nocursor; fi;;
     desktop:wayfire) if [ -c /dev/dri/card1 ] && command -v wayfire >/dev/null; then vnc_cursor_option=-nocursor; fi;;
+    desktop:phosh) if [ -c /dev/dri/card1 ] && command -v phoc >/dev/null; then vnc_cursor_option=-nocursor; fi;;
 esac
 [ -z "$vnc_cursor_option" ] || echo 'GUI_SESSION: pointer=compositor (x11vnc draws none)'
 vnc_resize_option=

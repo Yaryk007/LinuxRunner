@@ -268,16 +268,39 @@ elif [ "$environment" = phosh ] || [ "$environment" = plasma-mobile ]; then
   mkdir -p "$(dirname "$phoc_config")"
   { [ ! -f /usr/share/phosh/phoc.ini ] || awk '/^\[output:/{skip=1;next} /^\[/{skip=0} !skip' /usr/share/phosh/phoc.ini
     printf '\n[output:X11-1]\n# Managed by LinuxRunner: phone-sized UI on the session display.\nmode = %sx%s\nscale = %s\n' "$gw" "$gh" "$scale"; } > "$phoc_config"
+  # GPU (Settings › Graphics, Metal): with the virtio-gpu card, phoc drives it
+  # directly (DRM backend, GLES on virgl/Metal) and the KMS bridge shows its
+  # output in this X server, exactly like Wayfire. Otherwise nested, pixman.
+  phosh_gpu=0 phosh_output=X11-1
+  if [ -c /dev/dri/card1 ] && [ -S /run/seatd.sock ] && command -v gcc >/dev/null; then
+   export WLR_BACKENDS=drm WLR_DRM_DEVICES=/dev/dri/card1 WLR_RENDERER=gles2 LIBSEAT_BACKEND=seatd
+   phosh_gpu=1 phosh_output=Virtual-1
+   sed -i "s/^\[output:X11-1\]/[output:Virtual-1]/" "$phoc_config"
+  fi
   # Phosh's lock screen asks for the account password: start unlocked (iOS
   # locks the device). squeekboard is the on-screen keyboard.
-  phoc -C "$phoc_config" -E "$phosh_bin --unlocked" > "$session/phosh.log" 2>&1 & wm=$!; panel=$wm; surface=$wm
+  phoc -C "$phoc_config" -E "$phosh_bin --unlocked" > "$session/phosh.log" 2>&1 & wm=$!; surface=$wm
+  if [ "$phosh_gpu" = 1 ]; then
+   bridge_dir="${XDG_CACHE_HOME:-$HOME/.cache}/linuxrunner"
+   bridge="$bridge_dir/lr-kms-bridge-$(sha256sum lr-kms-bridge.c | cut -c1-16)"
+   if [ ! -x "$bridge" ]; then
+    mkdir -p "$bridge_dir" && gcc -O2 lr-kms-bridge.c -lX11 -lXext -lwayland-client -lxkbcommon -o "$bridge.new" && mv "$bridge.new" "$bridge" ||
+     { echo 'DESKTOP_STARTUP: phosh bridge build failed'; exit 127; }
+   fi
+  else panel=$wm; fi
   ( i=0
     until socket=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep -m1 '^wayland-[0-9]*$') && [ -S "$XDG_RUNTIME_DIR/$socket" ]; do
      i=$((i+1)); [ "$i" -lt 600 ] || exit 0; sleep .5; done
     publish_wayland "$XDG_RUNTIME_DIR/$socket"
-    ! command -v squeekboard >/dev/null || WAYLAND_DISPLAY=$socket squeekboard >> "$session/phosh.log" 2>&1 ) >> "$session/application.log" 2>&1 &
+    ! command -v squeekboard >/dev/null || WAYLAND_DISPLAY=$socket squeekboard >> "$session/phosh.log" 2>&1 & ) >> "$session/application.log" 2>&1 &
+  if [ "$phosh_gpu" = 1 ]; then
+   ( i=0
+     until socket=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep -m1 '^wayland-[0-9]*$') && [ -S "$XDG_RUNTIME_DIR/$socket" ]; do
+      i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep .5; done
+     WAYLAND_DISPLAY=$socket exec "$bridge" /dev/dri/card1 ) >> "$session/kms-bridge.log" 2>&1 & panel=$!
+  fi
   limit=900
-  echo "DESKTOP_STARTUP: environment=phosh session=$wm output=${gw}x${gh} scale=$scale renderer=pixman"
+  echo "DESKTOP_STARTUP: environment=phosh session=$wm output=${gw}x${gh} scale=$scale renderer=$([ "$phosh_gpu" = 1 ] && echo virgl || echo pixman)"
  else
   export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_TYPE=wayland KDE_FULL_SESSION=true KDE_SESSION_VERSION=6 DESKTOP_SESSION=plasma-mobile
   # KWin picks its X11 windowed backend because DISPLAY is set; QPainter

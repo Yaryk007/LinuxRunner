@@ -341,6 +341,13 @@ case "$mode" in
                 -- phosh phoc squeekboard foot xorg-xwayland adwaita-icon-theme cantarell-fonts gnome-settings-daemon || support_fail PROFILE phosh-packages
         fi
         phosh_present || support_fail PROFILE phosh-missing
+        # Optional, for the Metal GPU (Settings › Graphics): seat daemon, Mesa's
+        # virgl driver and the build files of LinuxRunner's KMS display bridge.
+        if ! { have seatd && pkg-config --exists wayland-client xkbcommon xext 2>/dev/null; }; then
+            install_packages "Phosh GPU support" seatd libwayland-dev libxkbcommon-dev libxext-dev libgl1-mesa-dri libegl-mesa0 \
+                -- seatd wayland-dev libxkbcommon-dev libxext-dev mesa-dri-gallium mesa-egl \
+                -- seatd wayland libxkbcommon libxext mesa || echo 'PROFILE: phosh GPU support unavailable; Phosh renders in software'
+        fi
         echo 'PROFILE: phosh=PASS';;
     plasma-mobile)
         # Plasma Mobile (KDE's phone shell) on KWin's Wayland compositor, nested
