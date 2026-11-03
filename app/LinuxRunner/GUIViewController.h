@@ -5,6 +5,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)runExternalDisplayContract:(void (^)(NSDictionary *result))completion;
 #endif
 - (instancetype)initDesktop;
+/// Desktop viewer wrapped in a navigation controller that defers status bar/home indicator to it.
++ (UINavigationController *)desktopNavigationController;
 - (NSDictionary *)desktopSessionSummary;
 /// Native desktop settings use these bounded actions; no arbitrary shell command.
 - (NSDictionary *)desktopControlState;

@@ -34,6 +34,9 @@ jobs:
       - name: Tools
         run: |
           brew install meson ninja lld cmake pkgconf
+          # virglrenderer's gallium meson.build needs python3 + PyYAML
+          python3 -m pip install --user --break-system-packages pyyaml || python3 -m pip install --break-system-packages pyyaml
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           xcodebuild -version
           df -h "$GITHUB_WORKSPACE"

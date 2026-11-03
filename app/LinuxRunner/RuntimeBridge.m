@@ -287,7 +287,7 @@ static NSString *desktopRoot;
 + (UIViewController *)desktopController {
     NSString *root=self.activeRootName;
     BOOL reuse=desktopNavigation&&[desktopRoot isEqual:root];
-    if(!reuse){desktopRoot=[root copy];desktopNavigation=[[UINavigationController alloc] initWithRootViewController:[[LRGUIViewController alloc] initDesktop]];}
+    if(!reuse){desktopRoot=[root copy];desktopNavigation=[LRGUIViewController desktopNavigationController];}
     if(!(reuse&&desktopNavigation.presentingViewController))[self desktopTrace:@"02 view" result:@"info" detail:[NSString stringWithFormat:@"desktop controller %@ root=%@",reuse?@"reused":@"created",root]];
     return desktopNavigation;
 }
@@ -696,7 +696,21 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
 #endif
     r[@"state"]=state;r[@"detail"]=detail;return r;
 }
+// LinuxRunner fork: Interpreter is only a fallback. When iOS allows the JIT
+// (StikDebug attached/launched us, or a TXM region was claimed), switch the
+// setting to Automatic and use it; without JIT the setting stays as it is.
++ (BOOL)jitAutoSwitch { id v=[NSUserDefaults.standardUserDefaults objectForKey:@"LinuxRunnerJIT.autoSwitch"]; return v?[v boolValue]:YES; }
++ (void)setJITAutoSwitch:(BOOL)on { [NSUserDefaults.standardUserDefaults setBool:on forKey:@"LinuxRunnerJIT.autoSwitch"]; }
++ (BOOL)switchToJITIfDetected {
+    if(!self.jitCompiledIn||!self.jitAutoSwitch||![self.executionMode isEqual:@"interpreter"])return NO;
+    BOOL seen=self.requiresPreparedJITRegion?LRTXMClaimState()==2:self.debuggerAttached;
+    if(!seen)return NO;
+    [self setExecutionMode:@"automatic"];
+    [self logCategory:@"JIT" event:@"JIT detected: execution mode switched from Interpreter to Automatic"];
+    return YES;
+}
 + (void)retryJITWhenAuthorized {
+    [self switchToJITIfDetected];
     // StikDebug usually grants JIT while LinuxRunner is running: try again on
     // each return to the foreground. The classic path is iOS's own mprotect
     // check (harmless when refused); TXM only runs while a debugger is attached.
@@ -728,6 +742,7 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
         LRJITDetail=[NSString stringWithFormat:@"Interpreter · the last JIT activation (%@) ended LinuxRunner; that method is disabled",crashedPath];
         [self logCategory:@"JIT" event:LRJITDetail];
     }
+    [self switchToJITIfDetected];
     NSString *mode=self.executionMode;
     if(!self.jitCompiledIn||[mode isEqual:@"interpreter"])return;
     // Automatic and JIT: use what iOS already allows (e.g. launched from StikDebug).
@@ -751,7 +766,7 @@ static BOOL LRTraced(void){struct kinfo_proc info={0};size_t size=sizeof info;in
     // Safe mode: conservative translator (no register pinning, block linking,
     // loop or SIMD translation). Read once by jit_init, so set it before boot.
     if(self.jitSafeMode){setenv("ISH_JIT_PIN","0",1);setenv("ISH_JIT_LINK","0",1);setenv("ISH_JIT_LOOP","0",1);setenv("ISH_JIT_SIMD","0",1);}
-    if(!self.requiresPreparedJITRegion||!self.jitClaimOnAttach||[self.executionMode isEqual:@"interpreter"])return;
+    if(!self.requiresPreparedJITRegion||!self.jitClaimOnAttach||([self.executionMode isEqual:@"interpreter"]&&!self.jitAutoSwitch))return;
     NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
     NSString *stale=[defaults stringForKey:LRJITAttemptKey];
     if(stale){NSArray *crashed=[defaults stringArrayForKey:LRJITCrashedPathsKey]?:@[];
@@ -765,7 +780,7 @@ static BOOL LRTraced(void){struct kinfo_proc info={0};size_t size=sizeof info;in
         [d removeObjectForKey:LRJITAttemptKey];[d synchronize];
         char text[160]={0};jit_ios_txm_claim_state(text,sizeof text);
         [LRRuntimeBridge logCategory:@"JIT" event:[NSString stringWithFormat:@"txm claim rc=%d %s",rc,text]];
-        if(rc==0)dispatch_async(dispatch_get_main_queue(),^{NSString *why=nil;[LRRuntimeBridge activateJIT:&why];});
+        if(rc==0)dispatch_async(dispatch_get_main_queue(),^{[LRRuntimeBridge switchToJITIfDetected];NSString *why=nil;[LRRuntimeBridge activateJIT:&why];});
     };
     if(LRTraced()){claim();return;}
     pthread_t thread;pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
@@ -1364,6 +1379,28 @@ static void LRWaitForProcess(TerminalViewController *process, NSTimeInterval tim
     for (NSString *path in @[@"/usr/bin/startplasma-wayland", @"/usr/bin/kwin_wayland", @"/usr/share/plasma/shells/org.kde.plasma.mobileshell/metadata.json"]) if (!LRReadGuestFile(path, 4).length) return NO;
     return YES;
 }
+// LinuxRunner fork: Open Desktop installs the chosen desktop when it is missing.
++ (BOOL)desktopEnvironmentInstalled:(NSString *)name {
+    if([name isEqual:@"plasma"])return self.plasmaInstalled;
+    if([name isEqual:@"lxqt"])return self.lxqtInstalled;
+    if([name isEqual:@"enlightenment"])return self.enlightenmentInstalled;
+    if([name isEqual:@"wayfire"])return self.wayfireInstalled;
+    if([name isEqual:@"hyprland"])return self.hyprlandInstalled;
+    if([name isEqual:@"phosh"])return self.phoshInstalled;
+    if([name isEqual:@"plasma-mobile"])return self.plasmaMobileInstalled;
+    return YES;
+}
++ (BOOL)desktopEnvironmentInstallable:(NSString *)name {
+    if([name isEqual:@"enlightenment"])return !self.activeEnvironmentIsDebian;
+    if([name isEqual:@"hyprland"])return self.activeEnvironmentIsArch;
+    if([name isEqual:@"plasma"])return self.activeEnvironmentIsDebian;
+    if([name isEqual:@"wayfire"])return self.activeEnvironmentIsDebian||self.activeEnvironmentIsArch;
+    return [@[@"lxqt",@"phosh",@"plasma-mobile"] containsObject:name];
+}
++ (void)installDesktopEnvironment:(NSString *)name progress:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion {
+    if(![@[@"plasma",@"lxqt",@"enlightenment",@"wayfire",@"hyprland",@"phosh",@"plasma-mobile"] containsObject:name]){completion(lrError(EINVAL,@"Unknown desktop"));return;}
+    [self runDesktopProfile:name progress:progress completion:completion];
+}
 + (void)runDesktopProfile:(NSString *)mode progress:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion {
     NSString *title = [mode isEqual:@"plasma"] ? @"Installing KDE Plasma" : [mode isEqual:@"lxqt"] ? @"Installing LXQt" : [mode isEqual:@"enlightenment"] ? @"Installing Enlightenment" : [mode isEqual:@"wayfire"] ? @"Installing Wayfire" : [mode isEqual:@"hyprland"] ? @"Installing Hyprland" : [mode isEqual:@"phosh"] ? @"Installing Phosh" : [mode isEqual:@"plasma-mobile"] ? @"Installing Plasma Mobile" : @"Installing Desktop Components";
     [self runSupportInstall:@[mode] title:title progress:progress completion:completion];
@@ -1414,6 +1451,10 @@ static NSString *LRInstallFailureMessage(NSString *category, NSString *detail) {
     [self beginAwake:@"installation"];
     [self logCategory:@"SETUP" event:[NSString stringWithFormat:@"support install started: %@ (%@)", title, [arguments componentsJoinedByString:@" "]]];
     NSDate *start = NSDate.date; __block NSDate *endedAt = nil; __block NSString *reported = nil;
+    // LinuxRunner fork: large desktops (Plasma Mobile: ~600 packages) can take
+    // more than an hour under the interpreter. Give up only after 30 minutes
+    // without any progress (log or apt status growing), not after a fixed hour.
+    __block NSDate *lastActivity = NSDate.date; __block unsigned long long lastSize = 0;
     [self postInstall:title phase:@"running" stage:@"Checking existing installation" detail:@"" fraction:-1 elapsed:0 error:nil log:nil];
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
         NSString *log = [NSString stringWithContentsOfURL:logURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
@@ -1448,7 +1489,10 @@ static NSString *LRInstallFailureMessage(NSString *category, NSString *detail) {
         NSString *result = [[NSString stringWithContentsOfURL:resultURL encoding:NSUTF8StringEncoding error:nil] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (installer.sessionPid <= 0 && !endedAt) endedAt = NSDate.date;
         NSTimeInterval elapsed = -[start timeIntervalSinceNow];
-        BOOL finished = result.length || (endedAt && -[endedAt timeIntervalSinceNow] > 5) || elapsed > 3600;
+        unsigned long long size = [[NSFileManager.defaultManager attributesOfItemAtPath:logURL.path error:nil] fileSize] + [[NSFileManager.defaultManager attributesOfItemAtPath:statusURL.path error:nil] fileSize];
+        if (size != lastSize) { lastSize = size; lastActivity = NSDate.date; }
+        BOOL stalled = -[lastActivity timeIntervalSinceNow] > 1800;
+        BOOL finished = result.length || (endedAt && -[endedAt timeIntervalSinceNow] > 5) || stalled || elapsed > 6 * 3600;
         if (finished) {
             [timer invalidate]; (void)installer;
             LRActiveInstall = nil;
@@ -1462,7 +1506,7 @@ static NSString *LRInstallFailureMessage(NSString *category, NSString *detail) {
             NSString *message = category ? LRInstallFailureMessage(category, failureDetail) :
                 result.length ? [NSString stringWithFormat:@"The installation failed at “%@”. Export the Open Desktop Report and try again.", stage ?: @"start"] :
                 endedAt ? @"The installer stopped before finishing. Try again; if it repeats, export the Open Desktop Report." :
-                @"The installation did not finish within an hour. Restart LinuxRunner and try again.";
+                @"The installation made no progress for 30 minutes. Check the network, restart LinuxRunner and try again.";
             NSArray *lines = [log componentsSeparatedByString:@"\n"];
             NSString *tail = [[lines subarrayWithRange:NSMakeRange(lines.count > 25 ? lines.count - 25 : 0, MIN((NSUInteger)25, lines.count))] componentsJoinedByString:@"\n"];
             [self postInstall:title phase:@"failed" stage:stage ?: @"Starting" detail:detail fraction:-1 elapsed:elapsed error:message log:tail];

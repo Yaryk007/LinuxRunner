@@ -191,6 +191,21 @@ install_packages() {
     else support_fail PROFILE package-manager-unsupported; fi
 }
 
+# LinuxRunner fork: optional packages, one at a time, never fatal (a package
+# the mirror does not offer is skipped). Same argument layout as install_packages.
+install_optional() {
+    olabel=$1; shift
+    od= oa= oarch= oside=debian
+    for p in "$@"; do if [ "$p" = -- ]; then if [ $oside = debian ]; then oside=alpine; else oside=arch; fi; continue; fi
+        case $oside in debian) od="$od $p";; alpine) oa="$oa $p";; *) oarch="$oarch $p";; esac; done
+    if have apt-get; then list=$od; elif have pacman; then list=$oarch; else list=$oa; fi
+    [ -n "$(echo $list)" ] || return 0
+    # All at once first (fast); on failure, each package alone.
+    if install_packages "$olabel" $list -- $list -- $list; then return 0; fi
+    for p in $list; do install_packages "$olabel: $p" $p -- $p -- $p || echo "PROFILE: optional package $p unavailable; skipped"; done
+    return 0
+}
+
 build_gui_helpers() {
     stage "Building display helpers"
     key=$({ cat support-version; sha256sum gui-test.c focus-manager.c; pkg-config --modversion x11 xcb; } | sha256sum | awk '{print $1}')
@@ -284,8 +299,9 @@ case "$mode" in
         esac
         repair "${2:-}"
         if ! { have startplasma-x11 && have kwin_x11 && have plasmashell; }; then
-            install_packages "KDE Plasma (experimental, about 550 packages)" plasma-desktop plasma-workspace kwin-x11 konsole dolphin breeze breeze-icon-theme dbus-x11 || support_fail PROFILE plasma-packages
+            install_packages "KDE Plasma (experimental, about 550 packages)" plasma-desktop plasma-workspace kwin-x11 dbus-x11 || support_fail PROFILE plasma-packages
         fi
+        install_optional "KDE Plasma extras" konsole dolphin breeze breeze-icon-theme
         have startplasma-x11 && have kwin_x11 && have plasmashell || support_fail PROFILE plasma-missing
         echo 'PROFILE: plasma=PASS';;
     lxqt)
@@ -324,10 +340,11 @@ case "$mode" in
         repair "${2:-}"
         [ "$distro" != alpine ] || support_fail PROFILE wayfire-unavailable-on-alpine
         if ! { have wayfire && have wf-panel && have foot; }; then
-            install_packages "Wayfire" wayfire wf-shell foot wcm xwayland \
+            install_packages "Wayfire" wayfire wf-shell foot \
                 -- wayfire \
-                -- wayfire wf-shell foot wcm xorg-xwayland || support_fail PROFILE wayfire-packages
+                -- wayfire wf-shell foot || support_fail PROFILE wayfire-packages
         fi
+        install_optional "Wayfire extras" wcm xwayland -- -- wcm xorg-xwayland
         have wayfire && have wf-panel && have foot || support_fail PROFILE wayfire-missing
         echo 'PROFILE: wayfire=PASS';;
     phosh)
@@ -336,10 +353,15 @@ case "$mode" in
         # on-screen keyboard. Debian 13, Alpine and Arch Linux ARM package it.
         repair "${2:-}"
         if ! phosh_present || ! have squeekboard; then
-            install_packages "Phosh" phosh phoc squeekboard phosh-mobile-tweaks foot xwayland adwaita-icon-theme fonts-cantarell gnome-settings-daemon \
-                -- phosh phoc squeekboard foot xwayland adwaita-icon-theme font-cantarell gnome-settings-daemon \
-                -- phosh phoc squeekboard foot xorg-xwayland adwaita-icon-theme cantarell-fonts gnome-settings-daemon || support_fail PROFILE phosh-packages
+            # Core first (must succeed), then extras one by one: a single missing
+            # optional package no longer fails the whole download.
+            install_packages "Phosh" phosh phoc squeekboard foot \
+                -- phosh phoc squeekboard foot \
+                -- phosh phoc squeekboard foot || support_fail PROFILE phosh-packages
         fi
+        install_optional "Phosh extras" phosh-mobile-tweaks xwayland adwaita-icon-theme fonts-cantarell gnome-settings-daemon \
+            -- xwayland adwaita-icon-theme font-cantarell gnome-settings-daemon \
+            -- xorg-xwayland adwaita-icon-theme cantarell-fonts gnome-settings-daemon
         phosh_present || support_fail PROFILE phosh-missing
         # Optional, for the Metal GPU (Settings › Graphics): seat daemon, Mesa's
         # virgl driver and the build files of LinuxRunner's KMS display bridge.
@@ -355,10 +377,13 @@ case "$mode" in
         # Maliit on-screen keyboard. Debian 13, Alpine and Arch Linux ARM package it.
         repair "${2:-}"
         if ! plasma_mobile_present; then
-            install_packages "Plasma Mobile (about 600 packages)" plasma-mobile plasma-mobile-tweaks kwin-wayland xwayland maliit-keyboard plasma-workspace-wallpapers konsole dbus-x11 \
-                -- plasma-mobile kwin xwayland maliit-keyboard konsole \
-                -- plasma-mobile kwin xorg-xwayland maliit-keyboard konsole || support_fail PROFILE plasma-mobile-packages
+            install_packages "Plasma Mobile (about 600 packages)" plasma-mobile kwin-wayland plasma-workspace dbus-x11 \
+                -- plasma-mobile kwin \
+                -- plasma-mobile kwin || support_fail PROFILE plasma-mobile-packages
         fi
+        install_optional "Plasma Mobile extras" plasma-mobile-tweaks xwayland maliit-keyboard plasma-workspace-wallpapers konsole \
+            -- xwayland maliit-keyboard konsole \
+            -- xorg-xwayland maliit-keyboard konsole
         plasma_mobile_present || support_fail PROFILE plasma-mobile-missing
         echo 'PROFILE: plasma-mobile=PASS';;
     hyprland)

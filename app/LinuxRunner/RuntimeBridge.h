@@ -95,6 +95,9 @@ void LRSetDatalessMaterialization(void);
 + (void)resetJITFailures;
 @property (class, nonatomic, setter=setJITClaimOnAttach:) BOOL jitClaimOnAttach;
 @property (class, nonatomic, setter=setJITSafeMode:) BOOL jitSafeMode;
+/// Switch Interpreter → Automatic as soon as JIT is detected (default on).
+@property (class, nonatomic, setter=setJITAutoSwitch:) BOOL jitAutoSwitch;
++ (BOOL)switchToJITIfDetected;
 + (void)createEnvironment:(NSString *)root completion:(void (^)(NSError * _Nullable))completion;
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)discoverApplications;
 + (NSArray<NSDictionary *> *)discoverGraphicalApplications;
@@ -144,6 +147,9 @@ void LRSetDatalessMaterialization(void);
 + (BOOL)phoshInstalled;
 + (void)installPlasmaMobile:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion;
 + (BOOL)plasmaMobileInstalled;
++ (BOOL)desktopEnvironmentInstalled:(NSString *)name;
++ (BOOL)desktopEnvironmentInstallable:(NSString *)name;
++ (void)installDesktopEnvironment:(NSString *)name progress:(void (^)(NSString *stage))progress completion:(void (^)(NSError * _Nullable error))completion;
 /// True while a support installation (account tools, desktop, KDE) runs; a
 /// second one is refused until it finishes.
 + (BOOL)installationRunning;

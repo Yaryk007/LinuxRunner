@@ -1378,12 +1378,13 @@ struct ExecutionEngineView: View {
                 }
                 Section {
                     Toggle("Claim JIT when StikDebug attaches", isOn: Binding(get: { LRRuntimeBridge.jitClaimOnAttach }, set: { LRRuntimeBridge.jitClaimOnAttach = $0 }))
+                    Toggle("Switch to JIT when detected", isOn: Binding(get: { LRRuntimeBridge.jitAutoSwitch }, set: { LRRuntimeBridge.jitAutoSwitch = $0 }))
                     Toggle("JIT safe mode", isOn: Binding(get: { LRRuntimeBridge.jitSafeMode }, set: { LRRuntimeBridge.jitSafeMode = $0 }))
                     if (LRRuntimeBridge.jitFailedMethods() as? [String] ?? []).count > 0 {
                         Button("Re-enable JIT methods disabled after a crash") { LRRuntimeBridge.resetJITFailures(); refresh() }
                     }
                 } header: { Text("JIT Options") } footer: {
-                    Text("Claim at attach requests StikDebug's code region immediately, then detaches it, so LinuxRunner never waits for a suspended StikDebug (this was the freeze). Turn it off only to debug with Xcode. Safe mode turns off register pinning, block linking, loops and SIMD in the translator. It is slower, but it avoids translator bugs if an app misbehaves with JIT. Both apply from the next launch.")
+                    Text("Claim at attach requests StikDebug's code region immediately, then detaches it, so LinuxRunner never waits for a suspended StikDebug (this was the freeze). Turn it off only to debug with Xcode. Switch to JIT when detected changes Interpreter to Automatic the moment StikDebug gives LinuxRunner JIT; without JIT the setting stays as it is. Safe mode turns off register pinning, block linking, loops and SIMD in the translator. It is slower, but it avoids translator bugs if an app misbehaves with JIT. Both apply from the next launch.")
                 }
                 if !active && (mode != "interpreter" || (report["debugger"] as? Bool ?? false)) {
                     Section {
@@ -1422,8 +1423,11 @@ struct ExecutionEngineView: View {
         }
     }
     private func refresh() {
+        _ = LRRuntimeBridge.switchToJITIfDetected()
         status = LRRuntimeBridge.executionBackendStatus() as? [String: Any] ?? [:]
         report = LRRuntimeBridge.jitStatusReport() as? [String: Any] ?? [:]
+        let current = LRRuntimeBridge.executionMode()
+        if mode != current { mode = current }
     }
     private func activate() {
         var detail: NSString?
@@ -1711,7 +1715,8 @@ private struct DesktopPreferencesView: View {
     @State private var resolution = 3
     @AppStorage("LinuxRunnerDesktop.autoFullscreen") private var autoFullscreen = true
     @AppStorage("LinuxRunnerDesktop.metalPresentation") private var metalPresentation = false
-    @AppStorage("LinuxRunnerDesktop.nativeScale") private var nativeScale = 1.0
+    @AppStorage("LinuxRunnerDesktop.nativeScale") private var nativeScale = 0.5
+    @AppStorage("LinuxRunnerDesktop.displayOnlyNative") private var displayOnlyNative = true
     @AppStorage("LinuxRunnerDesktop.customWidth") private var customWidth = 1280
     @AppStorage("LinuxRunnerDesktop.customHeight") private var customHeight = 720
     private var nativeDescription: String {
@@ -1723,8 +1728,10 @@ private struct DesktopPreferencesView: View {
         Section("Next Desktop Start") {
             Picker("Resolution", selection: $resolution) { Text("640 × 480").tag(0); Text("800 × 600").tag(1); Text("1024 × 768").tag(2); Text("960 × 540 · Wide").tag(3); Text("Fit Screen").tag(4); Text("Native · Follows Rotation").tag(5); Text("Custom").tag(6) }
             if resolution == 5 {
-                Picker("Native Scale", selection: $nativeScale) { Text("100% · Full").tag(1.0); Text("75%").tag(0.75); Text("50% · Faster").tag(0.5) }
-                Text("Native uses this device's real pixel resolution (\(nativeDescription)). When you rotate the device, the running desktop switches between portrait and landscape without restarting. Hyprland, and Wayfire on the GPU, keep their starting size. Higher resolutions need more CPU, so turn on the JIT or pick a lower scale if drawing is slow.").font(.caption)
+                Picker("Native Zoom", selection: $nativeScale) { Text("100% · Tiny, sharpest").tag(1.0); Text("133%").tag(0.75); Text("200% · Default").tag(0.5); Text("250%").tag(0.4); Text("300% · Largest").tag(1.0 / 3.0) }
+                Toggle("Display Only with Native", isOn: $displayOnlyNative)
+                Text("Hides every LinuxRunner control so only Linux is on screen. Tap with three fingers to bring the controls back (and again to hide them).").font(.caption)
+                Text("Native follows this device's screen (\(nativeDescription)); Zoom makes the Linux desktop bigger so buttons are easy to tap (200% renders at half the pixel count, which is also faster). When you rotate the device, the running desktop switches between portrait and landscape without restarting. Hyprland, and Wayfire on the GPU, keep their starting size. Higher resolutions need more CPU, so turn on the JIT or pick a lower scale if drawing is slow.").font(.caption)
             }
             if resolution == 6 {
                 HStack {
@@ -1739,7 +1746,7 @@ private struct DesktopPreferencesView: View {
         }
         Section("Interaction") {
             Text("Landscape uses the available display while preserving aspect ratio. Pinch to zoom; two fingers pan while zoomed, or scroll while fitted. Long press provides right click.")
-            Text("Desktop Settings provides Fit, Actual Size and Full Screen. Use the restore button to bring controls back.")
+            Text("Desktop Settings provides Fit, Actual Size, Full Screen and Display Only. Tap with three fingers to bring the controls back.")
         }
         Section("Framebuffer Presentation") {
             Toggle("Metal Presentation · Experimental", isOn: $metalPresentation)
@@ -2080,13 +2087,13 @@ private struct DesktopEnvironmentView: View {
         Section {
             Picker("Desktop", selection: $environment) {
                 Text("LinuxRunner Desktop").tag("linuxrunner")
-                Text("LXQt").tag("lxqt").disabled(!lxqtInstalled)
-                Text("Enlightenment").tag("enlightenment").disabled(!enlightenmentInstalled || LRRuntimeBridge.activeEnvironmentIsDebian())
-                Text("Wayfire").tag("wayfire").disabled(!wayfireInstalled)
-                Text("Hyprland · Experimental").tag("hyprland").disabled(!hyprlandInstalled)
-                Text("KDE Plasma · Experimental").tag("plasma").disabled(!installed)
-                Text("Phosh · Mobile").tag("phosh").disabled(!phoshInstalled)
-                Text("Plasma Mobile · Mobile").tag("plasma-mobile").disabled(!plasmaMobileInstalled)
+                Text("LXQt" + pending(lxqtInstalled)).tag("lxqt")
+                Text("Enlightenment" + pending(enlightenmentInstalled)).tag("enlightenment").disabled(!enlightenmentInstalled && !LRRuntimeBridge.desktopEnvironmentInstallable("enlightenment"))
+                Text("Wayfire" + pending(wayfireInstalled)).tag("wayfire").disabled(!wayfireInstalled && !LRRuntimeBridge.desktopEnvironmentInstallable("wayfire"))
+                Text("Hyprland · Experimental" + pending(hyprlandInstalled)).tag("hyprland").disabled(!hyprlandInstalled && !LRRuntimeBridge.desktopEnvironmentInstallable("hyprland"))
+                Text("KDE Plasma · Experimental" + pending(installed)).tag("plasma").disabled(!installed && !LRRuntimeBridge.desktopEnvironmentInstallable("plasma"))
+                Text("Phosh · Mobile" + pending(phoshInstalled)).tag("phosh")
+                Text("Plasma Mobile · Mobile" + pending(plasmaMobileInstalled)).tag("plasma-mobile")
             }
             Text(environment == "phosh"
                  ? "Phosh, the GNOME-based phone shell from the Librem 5 and postmarketOS: lock-free home screen, app grid, top bar with quick settings, and the squeekboard on-screen keyboard. It runs on the phoc compositor, drawn in software. It works best with the Native resolution in portrait."
@@ -2103,7 +2110,7 @@ private struct DesktopEnvironmentView: View {
                  : environment == "plasma"
                  ? "KDE Plasma 6 (X11 session: KWin, Plasma panel and desktop, Dolphin, Konsole) from Debian's own packages. It needs more memory and starts more slowly than the LinuxRunner Desktop. If it is not installed, Open Desktop starts the LinuxRunner Desktop."
                  : LRRuntimeBridge.activeEnvironmentIsArch() ? "Arch X11 desktop: Openbox window manager, LXQt panel and PCManFM-Qt file manager." : "Openbox window manager, panel and file manager: the lightest and most tested desktop.").font(.caption)
-        } header: { Text("Open Desktop Starts") } footer: { Text("Applies to the next desktop start. Stop a running desktop first to switch.") }
+        } header: { Text("Open Desktop Starts") } footer: { Text("Applies to the next desktop start. Stop a running desktop first to switch. A desktop that is not installed yet is downloaded automatically the next time you open the desktop.") }
         Section {
             if installed { Label("KDE Plasma installed", systemImage: "checkmark.circle") }
             else if LRRuntimeBridge.activeEnvironmentIsArch() { Text("Arch's current Plasma 6.8 packages require Wayland. LinuxRunner currently supports X11; use LinuxRunner Desktop. Plasma on Arch has not been validated.").foregroundColor(.secondary) }
@@ -2185,6 +2192,7 @@ private struct DesktopEnvironmentView: View {
         if UserDefaults.standard.object(forKey: key) == nil || UserDefaults.standard.integer(forKey: key) == 3 { UserDefaults.standard.set(5, forKey: key) }
     }
     .onAppear { phoshInstalled = LRRuntimeBridge.phoshInstalled(); plasmaMobileInstalled = LRRuntimeBridge.plasmaMobileInstalled(); installed = LRRuntimeBridge.plasmaInstalled(); lxqtInstalled = LRRuntimeBridge.lxqtInstalled(); enlightenmentInstalled = LRRuntimeBridge.enlightenmentInstalled(); wayfireInstalled = LRRuntimeBridge.wayfireInstalled(); hyprlandInstalled = LRRuntimeBridge.hyprlandInstalled() } }
+    private func pending(_ isInstalled: Bool) -> String { isInstalled ? "" : " · Downloads on Open" }
     private var anyWorking: Bool { phoshWorking != nil || plasmaMobileWorking != nil || hyprlandWorking != nil || wayfireWorking != nil || enlightenmentWorking != nil || lxqtWorking != nil || working != nil }
     private func installPhosh() {
         failure = nil; phoshWorking = "Starting"

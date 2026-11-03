@@ -528,6 +528,15 @@ static NSString *ApplicationPreflightFailure(NSURL *session) {
 - (void)rightMouse:(UITapGestureRecognizer *)g{[self countInput:@"uikit.secondary-click"];if(_pointerModeActive)return;[self click:4 at:[g locationInView:self]];}
 @end
 
+// LinuxRunner fork: the desktop's navigation controller lets the desktop view
+// decide the status bar, home indicator and edge gestures (Display Only).
+@interface LRDesktopNavigationController : UINavigationController
+@end
+@implementation LRDesktopNavigationController
+- (UIViewController *)childViewControllerForStatusBarHidden{return self.topViewController;}
+- (UIViewController *)childViewControllerForHomeIndicatorAutoHidden{return self.topViewController;}
+- (UIViewController *)childViewControllerForScreenEdgesDeferringSystemGestures{return self.topViewController;}
+@end
 @interface LRGUIViewController ()
 @property LRFramebufferView *surface;
 @property UILabel *status;
@@ -566,6 +575,11 @@ static NSString *ApplicationPreflightFailure(NSURL *session) {
 @property NSMutableSet<NSString *> *traceSessionMarks;
 @property UIStackView *inputToolbar;
 @property UIButton *immersiveButton;
+// LinuxRunner fork: Display Only (just the Linux display, edge to edge; three-finger tap toggles).
+@property BOOL displayOnly;
+@property BOOL desktopInstallAttempted;    // one automatic install of the chosen desktop per Open Desktop request
+@property NSArray<NSLayoutConstraint *> *stackInsetConstraints,*stackFullConstraints;
+@property UILabel *displayOnlyHint;
 @property NSDictionary *queuedDesktopApplication;
 @property NSString *lastLaunchRequest;
 @property (copy) NSString *sessionGuestUser;
@@ -811,7 +825,9 @@ static NSString *DesktopDegradedNotice(NSString *state);
     UIBarButtonItem *profiles=[[UIBarButtonItem alloc] initWithTitle:@"Profiles" style:UIBarButtonItemStylePlain target:self action:@selector(savedProfiles:)];
     self.navigationItem.rightBarButtonItems=_desktopMode?@[[[UIBarButtonItem alloc] initWithTitle:@"Desktop" style:UIBarButtonItemStylePlain target:self action:@selector(desktopOptions:)]]:@[logs,profiles];
     _stack=[UIStackView new];_stack.axis=UILayoutConstraintAxisVertical;_stack.spacing=10;_stack.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:_stack];
-    [NSLayoutConstraint activateConstraints:@[[_stack.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],[_stack.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:12],[_stack.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-12],[_stack.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor constant:-8]]];
+    _stackInsetConstraints=@[[_stack.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],[_stack.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:12],[_stack.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-12],[_stack.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor constant:-8]];
+    _stackFullConstraints=@[[_stack.topAnchor constraintEqualToAnchor:self.view.topAnchor],[_stack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],[_stack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],[_stack.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor]];
+    [NSLayoutConstraint activateConstraints:_stackInsetConstraints];
     UIStackView *actions=[UIStackView new];actions.spacing=12;actions.distribution=UIStackViewDistributionFillEqually;
     for(NSArray *item in @[@[@"Install GUI Support",@"install"],@[@"Run X11 Test",@"runTest"],@[@"Run xterm",@"runXterm"]]){UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];[b setTitle:item[0] forState:UIControlStateNormal];b.titleLabel.font=[UIFont systemFontOfSize:13];b.accessibilityIdentifier=item[0];[b addTarget:self action:NSSelectorFromString(item[1]) forControlEvents:UIControlEventTouchUpInside];[actions addArrangedSubview:b];}
     [_stack addArrangedSubview:actions];
@@ -832,9 +848,10 @@ static NSString *DesktopDegradedNotice(NSString *state);
     _modifierButtons=[NSMutableArray new];
     UIStackView *toolbar=[UIStackView new];_inputToolbar=toolbar;toolbar.spacing=4;toolbar.distribution=UIStackViewDistributionFillEqually;
     UIStackView *arrows=[UIStackView new];arrows.spacing=4;arrows.distribution=UIStackViewDistributionFillEqually;
-    for(NSString *title in @[@"Keyboard",@"Esc",@"Tab",@"Shift",@"Ctrl",@"Alt",@"Super",@"←",@"↑",@"↓",@"→",@"Close"]){UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];[b setTitle:title forState:UIControlStateNormal];b.titleLabel.font=[UIFont systemFontOfSize:12];b.accessibilityIdentifier=[@"GUI " stringByAppendingString:title];
+    for(NSString *title in @[@"Keyboard",@"Esc",@"Tab",@"Shift",@"Ctrl",@"Alt",@"Super",@"←",@"↑",@"↓",@"→",@"Full",@"Close"]){UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];[b setTitle:title forState:UIControlStateNormal];b.titleLabel.font=[UIFont systemFontOfSize:12];b.accessibilityIdentifier=[@"GUI " stringByAppendingString:title];
         if([@[@"Shift",@"Ctrl",@"Alt",@"Super"] containsObject:title])[_modifierButtons addObject:b];
-        if([title isEqual:@"Keyboard"]){[b setTitle:@"" forState:UIControlStateNormal];[b setImage:[UIImage systemImageNamed:@"keyboard"] forState:UIControlStateNormal];b.accessibilityLabel=@"Keyboard";}[b addTarget:self action:@selector(tool:) forControlEvents:UIControlEventTouchUpInside];[b.heightAnchor constraintEqualToConstant:44].active=YES;
+        if([title isEqual:@"Keyboard"]){[b setTitle:@"" forState:UIControlStateNormal];[b setImage:[UIImage systemImageNamed:@"keyboard"] forState:UIControlStateNormal];b.accessibilityLabel=@"Keyboard";}
+        if([title isEqual:@"Full"]){[b setTitle:@"" forState:UIControlStateNormal];[b setImage:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"] forState:UIControlStateNormal];b.accessibilityLabel=@"Display Only (three-finger tap to return)";}[b addTarget:self action:@selector(tool:) forControlEvents:UIControlEventTouchUpInside];[b.heightAnchor constraintEqualToConstant:44].active=YES;
         if([@[@"←",@"↑",@"↓",@"→"] containsObject:title])[arrows addArrangedSubview:b];else [toolbar addArrangedSubview:b];}
     [_stack addArrangedSubview:toolbar];[_stack addArrangedSubview:arrows];[_compactControls addObject:arrows];
     UISegmentedControl *secondary=[[UISegmentedControl alloc] initWithItems:@[@"Right click: long press",@"Right click: two-finger tap"]];secondary.selectedSegmentIndex=0;[secondary addTarget:self action:@selector(secondaryMode:) forControlEvents:UIControlEventValueChanged];[_stack addArrangedSubview:secondary];[_compactControls addObject:secondary];
@@ -858,6 +875,9 @@ static NSString *DesktopDegradedNotice(NSString *state);
     [capturePolicy addArrangedSubview:captureHint];[capturePolicy addArrangedSubview:sharedImages];[_stack addArrangedSubview:capturePolicy];[_compactControls addObject:capturePolicy];
     if(_desktopMode){
         _immersiveButton=[UIButton buttonWithType:UIButtonTypeSystem];[_immersiveButton setImage:[UIImage systemImageNamed:@"arrow.down.right.and.arrow.up.left"] forState:UIControlStateNormal];_immersiveButton.accessibilityLabel=@"Show Desktop Controls";_immersiveButton.backgroundColor=[UIColor colorWithWhite:.1 alpha:.8];_immersiveButton.layer.cornerRadius=16;_immersiveButton.translatesAutoresizingMaskIntoConstraints=NO;_immersiveButton.hidden=YES;[_immersiveButton addTarget:self action:@selector(toggleImmersive) forControlEvents:UIControlEventTouchUpInside];[self.view addSubview:_immersiveButton];[NSLayoutConstraint activateConstraints:@[[_immersiveButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:4],[_immersiveButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-8],[_immersiveButton.widthAnchor constraintEqualToConstant:32],[_immersiveButton.heightAnchor constraintEqualToConstant:32]]];
+        UITapGestureRecognizer *threeFinger=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(threeFingerTap:)];threeFinger.numberOfTouchesRequired=3;threeFinger.cancelsTouchesInView=YES;[self.view addGestureRecognizer:threeFinger];
+        _displayOnlyHint=[UILabel new];_displayOnlyHint.text=@"  Tap with three fingers to show the controls  ";_displayOnlyHint.font=[UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];_displayOnlyHint.textColor=UIColor.whiteColor;_displayOnlyHint.backgroundColor=[UIColor colorWithWhite:0 alpha:.7];_displayOnlyHint.layer.cornerRadius=14;_displayOnlyHint.clipsToBounds=YES;_displayOnlyHint.alpha=0;_displayOnlyHint.userInteractionEnabled=NO;_displayOnlyHint.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:_displayOnlyHint];
+        [NSLayoutConstraint activateConstraints:@[[_displayOnlyHint.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],[_displayOnlyHint.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],[_displayOnlyHint.heightAnchor constraintEqualToConstant:28]]];
         for(UIView *v in _launchControls)v.hidden=YES;for(UIView*v in _compactControls)v.hidden=YES;_status.text=@"Open Desktop starts a real Linux window manager. The first start in an environment installs desktop support automatically (network required).";}
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(background) name:UIApplicationWillResignActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(foreground) name:UIApplicationDidBecomeActiveNotification object:nil];
@@ -954,6 +974,34 @@ static NSString *DesktopDegradedNotice(NSString *state);
     [NSFileManager.defaultManager removeItemAtURL:[_supportURL URLByAppendingPathComponent:@"profile-check.result"] error:nil];
     [self showStartStage:@"Checking the Linux desktop" detail:@"Making sure the display, window manager and helpers are installed." busy:YES];
     [self runProfile:@[@"check"]];
+}
+// LinuxRunner fork: the desktop chosen in Settings › Desktop Environment for
+// this environment. If it is not installed yet, Open Desktop downloads and
+// installs it (once per request) instead of quietly starting the LinuxRunner
+// desktop in its place.
+- (NSString *)selectedDesktopEnvironment{
+    NSString *selected=[NSUserDefaults.standardUserDefaults stringForKey:[@"LinuxRunnerDesktop.environment." stringByAppendingString:LRRuntimeBridge.activeRootName]];
+    if(!selected&&LRRuntimeBridge.activeEnvironmentIsDebian)selected=[NSUserDefaults.standardUserDefaults stringForKey:@"LinuxRunnerDesktop.environment"];
+    return [@[@"plasma",@"lxqt",@"enlightenment",@"wayfire",@"hyprland",@"phosh",@"plasma-mobile"] containsObject:selected]?selected:@"linuxrunner";
+}
+- (BOOL)installSelectedDesktopIfNeeded{
+    NSString *desktop=[self selectedDesktopEnvironment];
+    if([desktop isEqual:@"linuxrunner"]||_desktopInstallAttempted||[LRRuntimeBridge desktopEnvironmentInstalled:desktop])return NO;
+    if(![LRRuntimeBridge desktopEnvironmentInstallable:desktop]){[self desktopStartLog:[@"selected desktop not available here: " stringByAppendingString:desktop]];return NO;}
+    _desktopInstallAttempted=YES;_startState=LRStartRepairing;
+    NSDictionary *names=@{@"plasma":@"KDE Plasma",@"lxqt":@"LXQt",@"enlightenment":@"Enlightenment",@"wayfire":@"Wayfire",@"hyprland":@"Hyprland",@"phosh":@"Phosh",@"plasma-mobile":@"Plasma Mobile"};
+    NSString *name=names[desktop]?:desktop;
+    [self desktopStartLog:[@"stage=install-desktop " stringByAppendingString:desktop]];[LRRuntimeBridge desktopTrace:@"desktop-install" result:@"start" detail:desktop];
+    [self showStartStage:[NSString stringWithFormat:@"Downloading %@",name] detail:[NSString stringWithFormat:@"%@ is the desktop chosen in Settings but is not installed yet. It is downloaded once from the distribution's servers (network needed; large desktops take a while). Keep LinuxRunner open.",name] busy:YES];
+    __weak typeof(self) weak=self;
+    [LRRuntimeBridge installDesktopEnvironment:desktop progress:^(NSString *stage){typeof(self) self=weak;if(self)self->_startTitle.text=stage;} completion:^(NSError *error){
+        typeof(self) self=weak;if(!self)return;
+        self->_startState=LRStartIdle;
+        [LRRuntimeBridge desktopTrace:@"desktop-install" result:error?@"fail":@"ok" detail:error.localizedDescription?:desktop];
+        if(error){[self desktopStartFailed:[NSString stringWithFormat:@"%@ could not be installed",name] detail:[NSString stringWithFormat:@"%@\n\nTap Retry to try the download again, or choose another desktop in Settings › Desktop Environment.",error.localizedDescription]];return;}
+        [self run:@"desktop"];
+    }];
+    return YES;
 }
 - (void)beginDesktopRepair:(NSString *)missing{
     if(_repairAttempted){[self desktopStartFailed:@"Desktop components are still missing" detail:[NSString stringWithFormat:@"Missing after installation: %@. Check the network and tap Retry; Details shows the installer log.",missing]];return;}
@@ -1163,7 +1211,7 @@ static NSString *LRTail(NSURL *url,NSUInteger lines){
     _startState=LRStartFailed;_startFailure=[NSString stringWithFormat:@"%@: %@",title,detail];[self desktopStartLog:[@"failed: " stringByAppendingString:_startFailure]];
     [self showStartStage:title detail:detail busy:NO];
 }
-- (void)retryDesktopStart{[LRRuntimeBridge desktopTraceBegin:@"retry"];_startState=LRStartIdle;_repairAttempted=NO;_profileReady=NO;[self hideStartPanel];[self run:@"desktop"];}
+- (void)retryDesktopStart{[LRRuntimeBridge desktopTraceBegin:@"retry"];_startState=LRStartIdle;_repairAttempted=NO;_desktopInstallAttempted=NO;_profileReady=NO;[self hideStartPanel];[self run:@"desktop"];}
 - (void)desktopStartDetails{
     NSMutableString *text=[NSMutableString stringWithFormat:@"%@\n",_startFailure?:@"Desktop startup"];
     for(NSString *name in @[@"profile-check.result",@"desktop-profile.sh.log"]){NSString *body=[self supportText:name];if(body.length)[text appendFormat:@"\n== %@\n%@\n",name,body.length>6000?[body substringFromIndex:body.length-6000]:body];}
@@ -1363,6 +1411,7 @@ static NSString *LRSessionGraphicsMode(void){
     NSError *error=nil;_supportURL=PrepareSupport(&error);if(!_supportURL){if(_desktopMode)[self desktopStartFailed:@"Desktop files could not be prepared" detail:[error.localizedDescription stringByAppendingString:@"\n\nError: FILESYSTEM_ERROR"]];else [self message:error.localizedDescription];return;}
     if(_desktopMode&&(_startState==LRStartChecking||_startState==LRStartRepairing)){[self.view bringSubviewToFront:_startPanel];return;} // already working on it
     if(_desktopMode&&![self profileVerified]){[self beginDesktopCheck];return;}
+    if(_desktopMode&&[self installSelectedDesktopIfNeeded])return;
     if(_desktopMode)[LRRuntimeBridge desktopTrace:@"06 packages" result:@"ok" detail:_profileReady?@"verified in this app run":@"verified earlier (profile-check.result newer than the support files)"];
     if(_desktopMode){_startState=LRStartSession;[self showStartStage:@"Starting the display" detail:@"Starting the display and window manager." busy:YES];[self desktopStartLog:@"stage=session"];
         [_profileTimer invalidate];_profileStarted=NSDate.date;__weak typeof(self) weak=self;
@@ -1392,9 +1441,7 @@ static NSString *LRSessionGraphicsMode(void){
     {unsigned gw=0,gh=0;if(sscanf(geometry.UTF8String,"%ux%u",&gw,&gh)==2)[LRRuntimeBridge setDesktopDisplayWidth:gw height:gh];}   // KMS compositors use exactly this size
     [LRRuntimeBridge logCategory:@"GUI_SESSION" event:[NSString stringWithFormat:@"root=%@ distribution=%@ geometry=%@ mode=%@ GLX=%@ (server capability; application renderer is independent)",LRRuntimeBridge.activeRootName,[LRRuntimeBridge activeEnvironmentIsDebian]?@"debian":@"alpine",geometry,mode,glxMode]];
     _sessionGuestUser=[LRRuntimeBridge.defaultLinuxUser copy];
-    NSString *desktopKey=[@"LinuxRunnerDesktop.environment." stringByAppendingString:LRRuntimeBridge.activeRootName];
-    NSString *selectedDesktop=[NSUserDefaults.standardUserDefaults stringForKey:desktopKey];
-    if(!selectedDesktop && LRRuntimeBridge.activeEnvironmentIsDebian)selectedDesktop=[NSUserDefaults.standardUserDefaults stringForKey:@"LinuxRunnerDesktop.environment"];
+    NSString *selectedDesktop=[self selectedDesktopEnvironment];
     NSDictionary *files=@{@"desktop-environment":([selectedDesktop isEqual:@"plasma"]||[selectedDesktop isEqual:@"lxqt"]||[selectedDesktop isEqual:@"enlightenment"]||[selectedDesktop isEqual:@"wayfire"]||[selectedDesktop isEqual:@"hyprland"]||[selectedDesktop isEqual:@"phosh"]||[selectedDesktop isEqual:@"plasma-mobile"])?selectedDesktop:@"linuxrunner",@"guest-user":_sessionGuestUser,@"geometry":geometry,@"glx-mode":glxMode,@"gpu-mode":LRSessionGraphicsMode(),@"input-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUIEagerInput"]?@"eager":@"legacy",@"shm-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUISharedImages"]?@"sysv":@"off",@"vnc-timing":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUILowLatencyInput"]?@"threads":@"default",@"password":password,@"cookie":cookie,@"port":[NSString stringWithFormat:@"%u",port],@"audio-port":_audioPort?[NSString stringWithFormat:@"%u",_audioPort]:@"",@"display":[NSString stringWithFormat:@"%u",display]};
     for(NSString *name in files){NSURL *url=[_sessionURL URLByAppendingPathComponent:name];if(![files[name] writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&error]||![NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:url.path error:&error]){[self message:error.localizedDescription];return;}}
     // LinuxRunner fork: Native follows rotation live (session.sh resizes Xvfb).
@@ -1478,8 +1525,11 @@ static NSString *DesktopDegradedNotice(NSString *state){
     double scale=screen.nativeScale>0?screen.nativeScale:screen.scale;
     double w=size.width*scale,h=size.height*scale;
     if(!(w>0&&h>0)){BOOL landscape=size.width>size.height;w=landscape?longer:shorter;h=landscape?shorter:longer;}
-    double factor=[NSUserDefaults.standardUserDefaults doubleForKey:@"LinuxRunnerDesktop.nativeScale"];
-    if(!(factor>=.25&&factor<=1))factor=1;
+    // LinuxRunner fork: Native Zoom (default 200% = half the pixels, so the UI is big enough to tap).
+    NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
+    if(![d boolForKey:@"LinuxRunnerDesktop.nativeZoom.v1"]){if([d doubleForKey:@"LinuxRunnerDesktop.nativeScale"]>=.99)[d removeObjectForKey:@"LinuxRunnerDesktop.nativeScale"];[d setBool:YES forKey:@"LinuxRunnerDesktop.nativeZoom.v1"];}
+    double factor=[d objectForKey:@"LinuxRunnerDesktop.nativeScale"]?[d doubleForKey:@"LinuxRunnerDesktop.nativeScale"]:.5;
+    if(!(factor>=.25&&factor<=1))factor=.5;
     return [LRGUIViewController geometryWidth:w*factor height:h*factor];
 }
 - (NSString *)customGeometry{
@@ -1529,7 +1579,30 @@ static NSString *DesktopDegradedNotice(NSString *state){
 // Full-screen desktop: hide the home indicator and let edge swipes reach the
 // Linux desktop first (a second swipe still triggers the system gesture).
 - (BOOL)prefersHomeIndicatorAutoHidden{return _desktopMode;}
+- (BOOL)prefersStatusBarHidden{return _displayOnly||(_desktopMode&&_inputToolbar.hidden);}
+// LinuxRunner fork: Display Only hides every LinuxRunner control (navigation
+// bar, toolbars, status, status bar) and shows the Linux display edge to edge.
+// A three-finger tap anywhere brings everything back (and hides it again).
+- (void)threeFingerTap:(UITapGestureRecognizer *)g{if(g.state!=UIGestureRecognizerStateEnded)return;[_surface releaseInput];[self resetModifierButtons];[self setDisplayOnly:!_displayOnly];}
+- (void)setDisplayOnly:(BOOL)on{
+    if(!_desktopMode)return;
+    _displayOnly=on;
+    [NSUserDefaults.standardUserDefaults setBool:on forKey:@"LinuxRunnerDesktop.displayOnly"];
+    _inputToolbar.hidden=on;_status.hidden=on;_immersiveButton.hidden=YES;
+    for(UIView *v in _compactControls)v.hidden=YES;
+    if(on){[NSLayoutConstraint deactivateConstraints:_stackInsetConstraints];[NSLayoutConstraint activateConstraints:_stackFullConstraints];_stack.spacing=0;self.view.backgroundColor=UIColor.blackColor;}
+    else{[NSLayoutConstraint deactivateConstraints:_stackFullConstraints];[NSLayoutConstraint activateConstraints:_stackInsetConstraints];_stack.spacing=10;self.view.backgroundColor=UIColor.systemBackgroundColor;}
+    [self.navigationController setNavigationBarHidden:on animated:NO];
+    [self setNeedsStatusBarAppearanceUpdate];[self.navigationController setNeedsStatusBarAppearanceUpdate];
+    [self setNeedsUpdateOfHomeIndicatorAutoHidden];[self setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+    [self.view layoutIfNeeded];[_surface fitViewport];
+    // Native resolution follows the new (larger) display area.
+    dispatch_async(dispatch_get_main_queue(),^{[self requestLiveResizeForSize:self.view.bounds.size];});
+    if(on){_displayOnlyHint.alpha=1;[self.view bringSubviewToFront:_displayOnlyHint];[UIView animateWithDuration:.6 delay:2.2 options:0 animations:^{self.displayOnlyHint.alpha=0;} completion:nil];}
+    else _displayOnlyHint.alpha=0;
+}
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures{return _desktopMode?UIRectEdgeAll:UIRectEdgeNone;}
++ (UINavigationController *)desktopNavigationController{return [[LRDesktopNavigationController alloc] initWithRootViewController:[[LRGUIViewController alloc] initDesktop]];}
 - (void)stopDesktopSession{if(_desktopMode)[self stop];}
 - (void)connectDesktopViewer{
     uint16_t port=[[NSString stringWithContentsOfURL:[_sessionURL URLByAppendingPathComponent:@"port"] encoding:NSUTF8StringEncoding error:nil] intValue];
@@ -1551,6 +1624,8 @@ static NSString *DesktopDegradedNotice(NSString *state){
         // Readiness depends on authenticated X11 component windows and actual
         // frame submission, never the wallpaper color or sampled pixel values.
         if(_desktopMode&&!_desktopPainted){_desktopPainted=YES;
+            {id auto_=[NSUserDefaults.standardUserDefaults objectForKey:@"LinuxRunnerDesktop.displayOnlyNative"];
+             if(!_displayOnly&&!_surface.relativeTouchpad&&((_resolution.selectedSegmentIndex==5&&(!auto_||[auto_ boolValue]))||[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerDesktop.displayOnly"]))[self setDisplayOnly:YES];}
             [LRRuntimeBridge desktopTrace:@"13 first-frame" result:@"ok" detail:@"frame submitted to the native surface; component readiness checked separately (GPU completion unmeasured)"];
         }
             if(_desktopMode&&[self externalOutputActive])[LRCurrentExternalDisplay presentFrame:_surface.latestPixels width:w height:h damage:damage];
@@ -1665,6 +1740,7 @@ static NSString *DesktopDegradedNotice(NSString *state){
 - (void)tool:(UIButton *)button{
     NSString *title=[button.accessibilityIdentifier substringFromIndex:4];
         if([title isEqual:@"Keyboard"]){if(_surface.isFirstResponder)[_surface resignFirstResponder];else [_surface becomeFirstResponder];return;}
+    if([title isEqual:@"Full"]){[self setDisplayOnly:YES];return;}
     if([title isEqual:@"Close"]&&_desktopMode){[self done];return;}
     if([title isEqual:@"Close"]){[self stop];[self message:@"Display closed. CLI remains functional."];return;}
     NSDictionary *modifiers=@{@"Shift":@(UIKeyModifierShift),@"Ctrl":@(UIKeyModifierControl),@"Alt":@(UIKeyModifierAlternate),@"Super":@(UIKeyModifierCommand)};
@@ -1712,7 +1788,7 @@ static NSString *DesktopDegradedNotice(NSString *state){
     _lastLaunchRequest=config[@"requestID"];
     [LRRuntimeBridge logCategory:@"DESKTOP_LAUNCH" event:[NSString stringWithFormat:@"executable=%@ request=%@",executable,target.lastPathComponent]];
 }
-- (void)setImmersive:(BOOL)hide{_inputToolbar.hidden=hide;_status.hidden=hide;_immersiveButton.hidden=!hide;[self.navigationController setNavigationBarHidden:hide animated:YES];[self setNeedsStatusBarAppearanceUpdate];}
+- (void)setImmersive:(BOOL)hide{if(_displayOnly)return;_inputToolbar.hidden=hide;_status.hidden=hide;_immersiveButton.hidden=!hide;[self.navigationController setNavigationBarHidden:hide animated:YES];[self setNeedsStatusBarAppearanceUpdate];}
 - (void)toggleImmersive{[self setImmersive:!_inputToolbar.hidden];}
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
@@ -1796,6 +1872,7 @@ static NSString *DesktopDegradedNotice(NSString *state){
     NSString *hint=_trackpadRequested?@"Waiting for external desktop output. You can cancel below.":nil;
     UIAlertController *menu=[UIAlertController alertControllerWithTitle:nil message:hint preferredStyle:UIAlertControllerStyleActionSheet];
     [menu addAction:[UIAlertAction actionWithTitle:@"Start / Reconnect Desktop" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){[self performDesktopAction:@"start"];}]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Display Only (three-finger tap returns)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){[self setDisplayOnly:YES];}]];
     [menu addAction:[UIAlertAction actionWithTitle:_surface.relativeTouchpad?@"Show Desktop on This Device":_trackpadRequested?@"Cancel Trackpad Connection":@"Use iPhone as Trackpad" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){[self performDesktopAction:@"touchpad"];}]];
     for(NSArray *item in @[@[@"Wireless Display",@"wireless"],@[@"Paste Clipboard Text",@"clipboard"]]){
         UIAlertAction *action=[UIAlertAction actionWithTitle:item[0] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){[self performDesktopAction:item[1]];}];
