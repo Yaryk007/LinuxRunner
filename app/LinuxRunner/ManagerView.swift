@@ -475,7 +475,7 @@ struct ManagerView: View {
                         Circle().fill(LRRuntimeBridge.isRunning() ? Color.green : Color.orange).frame(width: 6, height: 6)
                         Text(activeEnvironment?.name ?? LRRuntimeBridge.runtimeStatus()).font(.caption)
                         Spacer()
-                        Text("ARM64 · Interpreter").font(.caption2).foregroundColor(.secondary)
+                        Text("ARM64 · " + ((LRRuntimeBridge.jitStatusReport() as? [String: Any])?["state"] as? String ?? "Interpreter Active")).font(.caption2).foregroundColor(.secondary)
                     }.padding(.top, 8)
                     if !LRRuntimeBridge.isRunning() {
                         Button(action: startRuntime) {
@@ -1712,7 +1712,7 @@ private struct DesktopLogsScreen: View {
 }
 
 private struct DesktopPreferencesView: View {
-    @State private var resolution = 3
+    @State private var resolution = 5
     @AppStorage("LinuxRunnerDesktop.autoFullscreen") private var autoFullscreen = true
     @AppStorage("LinuxRunnerDesktop.metalPresentation") private var metalPresentation = false
     @AppStorage("LinuxRunnerDesktop.nativeScale") private var nativeScale = 0.5
@@ -1753,7 +1753,7 @@ private struct DesktopPreferencesView: View {
             Text("Applies when reopening the viewer. Presents the received framebuffer through Metal, with Core Graphics fallback. Linux applications still use software rendering and the ARM64 interpreter. Physical-device performance has not yet been verified.").font(.caption)
         }
         Section("Execution") { Text("ARM64 interpreter; JIT is not required. The renderer for Linux applications is chosen in Settings › Graphics.").font(.caption) }
-    }.navigationTitle("Display & Gestures").onAppear { resolution = UserDefaults.standard.object(forKey: key) == nil ? 3 : min(6, max(0, UserDefaults.standard.integer(forKey: key))) }.onChange(of: resolution) { UserDefaults.standard.set($0, forKey: key) } }
+    }.navigationTitle("Display & Gestures").onAppear { resolution = UserDefaults.standard.object(forKey: key) == nil ? 5 : min(6, max(0, UserDefaults.standard.integer(forKey: key))) }.onChange(of: resolution) { UserDefaults.standard.set($0, forKey: key) } }
 }
 /// Graphics renderer for Linux applications, plus live evidence of what actually ran on the GPU.
 // Folders the user picks in Files (iPhone, iCloud Drive, other providers or an

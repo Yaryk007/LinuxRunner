@@ -684,7 +684,10 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
 #ifdef LINUXRUNNER_JIT_BUILD
     uint64_t blocks=0,segments=0,bytes=0;jit_counters(&blocks,&segments,&bytes);
     r[@"blocks"]=@(blocks);r[@"segments"]=@(segments);r[@"code_kb"]=@(bytes/1024);
-    if(LRJITActive&&segments>0){state=@"JIT Active";detail=[NSString stringWithFormat:@"%@ · %llu guest blocks translated, %llu native segments installed, %llu KB generated code",LRJITDetail,blocks,segments,bytes/1024];}
+    uint64_t regionUsed=0,regionTotal=0,regionReclaimed=0;bool regionFull=false;jit_region_usage(&regionUsed,&regionTotal,&regionReclaimed,&regionFull);
+    r[@"region_used_mb"]=@(regionUsed>>20);r[@"region_total_mb"]=@(regionTotal>>20);r[@"region_reclaimed_mb"]=@(regionReclaimed>>20);r[@"region_full"]=@(regionFull);
+    NSString *regionText=[NSString stringWithFormat:@"code region %llu of %llu MB in use, %llu MB recycled from ended processes%@",regionUsed>>20,regionTotal>>20,regionReclaimed>>20,regionFull?@"; it filled up, so some code ran interpreted":@""];
+    if(LRJITActive&&segments>0){state=@"JIT Active";detail=[NSString stringWithFormat:@"%@ · %llu guest blocks translated, %llu native segments installed, %llu KB generated code · %@",LRJITDetail,blocks,segments,bytes/1024,regionText];}
     else if(LRJITActive){state=@"JIT Initializing";detail=[NSString stringWithFormat:@"%@ · code region verified (test code returned the expected value); no guest code translated yet — start or use Linux",LRJITDetail];}
     else if(crashed.count&&!LRJITLastFailure){state=@"JIT Failed";detail=[NSString stringWithFormat:@"A previous activation (%@) ended LinuxRunner; that method is disabled. Interpreter fallback active.",[crashed componentsJoinedByString:@", "]];}
     else if([self.executionMode isEqual:@"interpreter"]){state=@"Interpreter Active";detail=self.debuggerAttached?@"A debugger is attached: choose Automatic or JIT to use it":@"Interpreter selected";}
@@ -728,8 +731,19 @@ static NSString *LRJITLastFailure;   // reason of the last refused or failed act
         if([key hasPrefix:@"LinuxRunnerDesktop.resolution."]&&[d integerForKey:key]==4)[d setInteger:3 forKey:key];
     [d setBool:YES forKey:@"LinuxRunnerDesktop.landscapeDefault.v1"];
 }
+// LinuxRunner fork: the desktop fills the screen and follows rotation by
+// default. Runs after the migration above; a fixed size chosen other than the
+// stock 960x540 is kept (it still turns with the device).
++ (void)migrateDesktopSizeToNative {
+    NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
+    if([d boolForKey:@"LinuxRunnerDesktop.followScreen.v1"])return;
+    for(NSString *key in d.dictionaryRepresentation.allKeys)
+        if([key hasPrefix:@"LinuxRunnerDesktop.resolution."]&&([d integerForKey:key]==3||[d integerForKey:key]==4))[d setInteger:5 forKey:key];
+    [d setBool:YES forKey:@"LinuxRunnerDesktop.followScreen.v1"];
+}
 + (void)prepareExecutionBackendAtLaunch {
     [self migrateDesktopSizeToLandscape];
+    [self migrateDesktopSizeToNative];
     static dispatch_once_t observe;
     dispatch_once(&observe,^{[NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){[LRRuntimeBridge retryJITWhenAuthorized];}];});
     NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
@@ -772,9 +786,14 @@ static BOOL LRTraced(void){struct kinfo_proc info={0};size_t size=sizeof info;in
     if(stale){NSArray *crashed=[defaults stringArrayForKey:LRJITCrashedPathsKey]?:@[];
         if(![crashed containsObject:stale])[defaults setObject:[crashed arrayByAddingObject:stale] forKey:LRJITCrashedPathsKey];
         [defaults removeObjectForKey:LRJITAttemptKey];[defaults synchronize];}
-    if([[defaults stringArrayForKey:LRJITCrashedPathsKey] containsObject:@"txm"])return;
+    // A claim only runs when StikDebug attached, which the user asked for, so a
+    // previous one that was interrupted (the app was closed, StikDebug went away)
+    // does not block this one: it used to turn the JIT off for good, silently.
     void (^claim)(void)=^{
         NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
+        NSMutableArray *failed=[[d stringArrayForKey:LRJITCrashedPathsKey]?:@[] mutableCopy];
+        if([failed containsObject:@"txm"]){[failed removeObject:@"txm"];[d setObject:failed forKey:LRJITCrashedPathsKey];
+            [LRRuntimeBridge logCategory:@"JIT" event:@"StikDebug attached: retrying the TXM claim after an earlier interrupted attempt"];}
         [d setObject:@"txm" forKey:LRJITAttemptKey];[d synchronize];
         int rc=jit_ios_claim_txm(0);
         [d removeObjectForKey:LRJITAttemptKey];[d synchronize];

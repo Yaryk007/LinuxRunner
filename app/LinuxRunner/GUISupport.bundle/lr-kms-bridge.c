@@ -83,6 +83,33 @@ static struct xkb_state *send_keymap(struct wl_proxy *keyboard) {
     return xkb_state_new(map);
 }
 
+static XImage *make_image(Display *x, int screen, unsigned w, unsigned h, XShmSegmentInfo *shm) {
+    XImage *image = NULL;
+    *shm = (XShmSegmentInfo) {0};
+    if (XShmQueryExtension(x)) {
+        image = XShmCreateImage(x, DefaultVisual(x, screen), 24, ZPixmap, NULL, shm, w, h);
+        shm->shmid = image ? shmget(IPC_PRIVATE, (size_t) image->bytes_per_line * h, IPC_CREAT | 0600) : -1;
+        shm->shmaddr = shm->shmid >= 0 ? shmat(shm->shmid, NULL, 0) : (void *) -1;
+        if (image) image->data = shm->shmaddr;
+        if (!image || shm->shmaddr == (void *) -1 || !XShmAttach(x, shm)) {
+            if (image) { image->data = NULL; XDestroyImage(image); }
+            image = NULL; shm->shmaddr = NULL;
+        } else shmctl(shm->shmid, IPC_RMID, NULL);
+    }
+    if (!image) image = XCreateImage(x, DefaultVisual(x, screen), 24, ZPixmap, 0, malloc((size_t) w * h * 4), w, h, 32, 0);
+    return image;
+}
+static void free_image(Display *x, XImage *image, XShmSegmentInfo *shm) {
+    if (shm->shmaddr && shm->shmaddr != (void *) -1) {
+        XShmDetach(x, shm);
+        XSync(x, False);   // the server lets go before the memory does
+        shmdt(shm->shmaddr);
+        image->data = NULL;
+        shm->shmaddr = NULL;
+    }
+    XDestroyImage(image);
+}
+
 int main(int argc, char **argv) {
     const char *node = argc > 1 ? argv[1] : "/dev/dri/card0";
     int drm = open(node, O_RDWR | O_CLOEXEC);
@@ -117,18 +144,8 @@ int main(int argc, char **argv) {
     XSetInputFocus(x, win, RevertToParent, CurrentTime);
     GC gc = DefaultGC(x, screen);
     XShmSegmentInfo shm = {0};
-    XImage *image = NULL;
-    if (XShmQueryExtension(x)) {
-        image = XShmCreateImage(x, DefaultVisual(x, screen), 24, ZPixmap, NULL, &shm, w, h);
-        shm.shmid = image ? shmget(IPC_PRIVATE, (size_t) image->bytes_per_line * h, IPC_CREAT | 0600) : -1;
-        shm.shmaddr = shm.shmid >= 0 ? shmat(shm.shmid, NULL, 0) : (void *) -1;
-        if (image) image->data = shm.shmaddr;
-        if (!image || shm.shmaddr == (void *) -1 || !XShmAttach(x, &shm)) {
-            if (image) { image->data = NULL; XDestroyImage(image); }
-            image = NULL; shm.shmaddr = NULL;
-        } else shmctl(shm.shmid, IPC_RMID, NULL);
-    }
-    if (!image) image = XCreateImage(x, DefaultVisual(x, screen), 24, ZPixmap, 0, malloc((size_t) w * h * 4), w, h, 32, 0);
+    XImage *image = make_image(x, screen, w, h, &shm);
+    XSelectInput(x, RootWindow(x, screen), StructureNotifyMask);   // rotation: the screen changes size
     fprintf(stderr, "KMS_BRIDGE: window %ux%u %s\n", w, h, shm.shmaddr && shm.shmaddr != (void *) -1 ? "MIT-SHM" : "XPutImage");
     XSync(x, False);
 
@@ -141,6 +158,18 @@ int main(int argc, char **argv) {
             XEvent e; XNextEvent(x, &e);
             if (debug) fprintf(stderr, "KMS_BRIDGE: X event %d\n", e.type);
             if (e.type == Expose) { shown_fb = 0; continue; }
+            if (e.type == ConfigureNotify) {
+                if (e.xconfigure.window != RootWindow(x, screen)) continue;
+                unsigned nw = (unsigned) e.xconfigure.width, nh = (unsigned) e.xconfigure.height;
+                if (nw == w && nh == h) continue;
+                free_image(x, image, &shm);
+                w = nw; h = nh;
+                XMoveResizeWindow(x, win, 0, 0, w, h);
+                image = make_image(x, screen, w, h, &shm);
+                shown_fb = 0;
+                fprintf(stderr, "KMS_BRIDGE: window resized to %ux%u\n", w, h);
+                continue;
+            }
             if (pointer && e.type == MotionNotify) {
                 wl_proxy_marshal(pointer, VP_MOTION_ABSOLUTE, ms(), (uint32_t) e.xmotion.x, (uint32_t) e.xmotion.y, w, h);
                 wl_proxy_marshal(pointer, VP_FRAME);

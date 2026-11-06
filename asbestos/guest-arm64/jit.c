@@ -160,6 +160,7 @@ static bool map_jit(void) {
 }
 #endif
 
+static __thread struct tlb *cm_tlb;   // tlb of the block being compiled (code map below)
 static uint8_t *region_alloc(size_t bytes);
 
 void jit_counters(uint64_t *blocks, uint64_t *segments, uint64_t *code_bytes) {
@@ -266,22 +267,106 @@ int jit_ios_acquire(bool txm, char *detail, size_t size) {
 }
 #endif
 
-static uint8_t *region_alloc(size_t bytes) {
-    // Failed reservations must not consume space (or wrap the cursor). Check
-    // before rounding too: SIZE_MAX would otherwise round down to zero.
-    if (!region || !bytes || bytes > REGION_SIZE)
+// LinuxRunner fork: the region is handed out in chunks owned by one guest
+// address space, and a chunk returns to the pool when that address space goes
+// away (jit_asbestos_free, the same moment its blocks are freed, so nothing can
+// still run or link to the code). Upstream's cursor only moved forward: every
+// process retranslates its own code, and a desktop session starts several short
+// processes per second, so the 120 MB only ever shrank; once full, all new code
+// silently stayed on the gadgets. Code shared between processes (PIC)
+// and the exit stub stay in the permanent owner.
+#define CHUNK_SIZE (256u << 10)
+#define CHUNK_COUNT (REGION_SIZE / CHUNK_SIZE)
+struct region_owner {
+    uint8_t *cursor, *end;
+    uint16_t *chunks;
+    unsigned count, capacity;
+};
+static pthread_mutex_t region_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint16_t free_chunks[CHUNK_COUNT];
+static unsigned free_chunk_count, next_chunk;
+static struct region_owner permanent_owner;
+static _Atomic uint64_t region_reclaimed;
+
+static uint8_t *region_alloc_from(struct region_owner *o, size_t bytes) {
+    // Failed reservations must not consume space. A translation is at most
+    // sizeof(em.buf), well under a chunk.
+    if (!region || !bytes || bytes > CHUNK_SIZE)
         return NULL;
     size_t aligned = (bytes + 15) & ~(size_t) 15;
-    size_t off = atomic_load_explicit(&region_used, memory_order_relaxed);
-    for (;;) {
-        if (off > REGION_SIZE || aligned > REGION_SIZE - off) {
+    pthread_mutex_lock(&region_lock);
+    if (!o->cursor || aligned > (size_t) (o->end - o->cursor)) {
+        if (o->count == o->capacity) {
+            unsigned capacity = o->capacity ? o->capacity * 2 : 8;
+            uint16_t *chunks = realloc(o->chunks, capacity * sizeof *chunks);
+            if (!chunks) {
+                pthread_mutex_unlock(&region_lock);
+                return NULL;
+            }
+            o->chunks = chunks;
+            o->capacity = capacity;
+        }
+        unsigned chunk;
+        if (free_chunk_count) {
+            chunk = free_chunks[--free_chunk_count];
+        } else if (next_chunk < CHUNK_COUNT) {
+            chunk = next_chunk++;
+            atomic_store_explicit(&region_used, (size_t) next_chunk * CHUNK_SIZE, memory_order_relaxed);
+        } else {
             atomic_store_explicit(&region_exhausted, true, memory_order_relaxed);
+            pthread_mutex_unlock(&region_lock);
             return NULL;
         }
-        if (atomic_compare_exchange_weak_explicit(&region_used, &off, off + aligned,
-                                                  memory_order_relaxed, memory_order_relaxed))
-            return region + off;
+        o->chunks[o->count++] = (uint16_t) chunk;
+        o->cursor = region + (size_t) chunk * CHUNK_SIZE;
+        o->end = o->cursor + CHUNK_SIZE;
     }
+    uint8_t *code = o->cursor;
+    o->cursor += aligned;
+    pthread_mutex_unlock(&region_lock);
+    return code;
+}
+
+static uint8_t *region_alloc(size_t bytes) {
+    return region_alloc_from(&permanent_owner, bytes);
+}
+
+// The owner of the code being translated: its address space, unless the code
+// is shared between address spaces.
+static uint8_t *region_alloc_block(size_t bytes) {
+    struct asbestos *a = !pic_on && cm_tlb ? cm_tlb->mmu->asbestos : NULL;
+    if (!a)
+        return region_alloc(bytes);
+    pthread_mutex_lock(&region_lock);
+    if (!a->jit_region)
+        a->jit_region = calloc(1, sizeof(struct region_owner));
+    struct region_owner *o = a->jit_region;
+    pthread_mutex_unlock(&region_lock);
+    return o ? region_alloc_from(o, bytes) : NULL;
+}
+
+static void region_release(struct asbestos *a) {
+    struct region_owner *o = a->jit_region;
+    if (!o)
+        return;
+    a->jit_region = NULL;
+    pthread_mutex_lock(&region_lock);
+    for (unsigned i = 0; i < o->count; i++)
+        free_chunks[free_chunk_count++] = o->chunks[i];
+    pthread_mutex_unlock(&region_lock);
+    atomic_fetch_add_explicit(&region_reclaimed, (uint64_t) o->count * CHUNK_SIZE, memory_order_relaxed);
+    free(o->chunks);
+    free(o);
+}
+
+void jit_region_usage(uint64_t *used, uint64_t *total, uint64_t *reclaimed, bool *exhausted) {
+    pthread_mutex_lock(&region_lock);
+    uint64_t in_use = (uint64_t) (next_chunk - free_chunk_count) * CHUNK_SIZE;
+    pthread_mutex_unlock(&region_lock);
+    if (used) *used = in_use;
+    if (total) *total = REGION_SIZE;
+    if (reclaimed) *reclaimed = atomic_load_explicit(&region_reclaimed, memory_order_relaxed);
+    if (exhausted) *exhausted = atomic_load_explicit(&region_exhausted, memory_order_relaxed);
 }
 
 // MAP_JIT W^X is per thread and only this thread's fiber runs its native
@@ -1347,7 +1432,7 @@ static uint8_t *finish_native(struct em *e, struct fiber_block *b, uintptr_t ori
             emit_exit(e, stub_pos[s] == first_pos ? orig_first : b->code[stub_pos[s]]);
         }
     }
-    uint8_t *dst = e->fail ? NULL : region_alloc(e->n * 4);
+    uint8_t *dst = e->fail ? NULL : region_alloc_block(e->n * 4);
     if (!dst)
         return NULL;
     for (unsigned i = 0; i < e->nfix; i++) {
@@ -2253,9 +2338,8 @@ void jit_asbestos_free(struct asbestos *a) {
         free(n);
         n = next;
     }
+    region_release(a);
 }
-
-static __thread struct tlb *cm_tlb;   // tlb of the block being compiled (code map below)
 
 // Module, offset and base of the guest code at pc; anonymous code is its own
 // module per address, at base 0. -1 if pc is not mapped.

@@ -73,6 +73,7 @@ struct asbestos {
     wrlock_t jetsam_lock;
 #ifdef ISH_JIT
     void *jit_ctxs;
+    void *jit_region;   // this address space's chunks of the code region
 #endif
 };
 

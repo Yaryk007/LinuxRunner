@@ -60,6 +60,11 @@ if [ "$(id -u)" = 0 ] && [ "$guest_user" != root ]; then
     fi
     if [ "$mode" = desktop ] && { [ "$kms_desktop" = hyprland ] || [ "$kms_desktop" = wayfire-gpu ] || [ "$kms_desktop" = phosh-gpu ]; } && command -v seatd >/dev/null; then
         mkdir -p /dev/dri /run/udev/data
+        # Rotation on the GPU card needs wlr-randr; desktops installed before
+        # this build do not have it. Never delays the session.
+        case "$kms_desktop" in phosh-gpu|wayfire-gpu)
+            command -v wlr-randr >/dev/null || ( { apt-get install -y --no-install-recommends wlr-randr || apk add wlr-randr || pacman -S --noconfirm --needed wlr-randr; } > "$session/wlr-randr-install.log" 2>&1 & );;
+        esac
         [ -c /dev/dri/card0 ] || mknod -m 660 /dev/dri/card0 c 226 0
         [ -c /dev/dri/renderD128 ] || mknod -m 666 /dev/dri/renderD128 c 226 128
         chown "root:$gid" /dev/dri/card0
@@ -219,12 +224,12 @@ fi
 # Live resize (LinuxRunner fork): with "Native" the app asks for a new size when
 # the device rotates. Xvfb's RandR can shrink and grow the screen up to the size
 # it started with, so it starts as a square of the longer side and is set to
-# the requested size right away. KMS compositors keep a fixed size.
+# the requested size right away. wlroots on the GPU card (Phosh, Wayfire) takes
+# the new size as a custom output mode; Hyprland keeps a fixed size.
 resizable=no
 if [ -f "$session/resizable" ] && command -v xrandr >/dev/null; then
     case "$mode:$(cat "$session/desktop-environment" 2>/dev/null)" in
         desktop:hyprland) ;;
-        desktop:wayfire|desktop:phosh) [ -c /dev/dri/card1 ] || resizable=yes;;
         *) resizable=yes;;
     esac
 fi
@@ -238,6 +243,16 @@ lr_resize() {
         xrandr --addmode "$output" "$name" 2>/dev/null || return 1
     }
     xrandr --output "$output" --mode "$name" --fb "${rw}x${rh}" 2>>"$session/resize.log"
+}
+lr_kms_resize() {
+    # On the GPU card the compositor owns the output, not this X server. It
+    # goes first: if it refuses, the X screen keeps matching what it draws.
+    [ -f "$session/kms-wayland" ] || return 0
+    command -v wlr-randr >/dev/null || { echo 'GUI_SESSION: wlr-randr is not installed yet; the size stays until it is' >> "$session/resize.log"; return 1; }
+    kms_socket=$(cat "$session/kms-wayland")
+    kms_output=$(XDG_RUNTIME_DIR=${kms_socket%/*} WAYLAND_DISPLAY=${kms_socket##*/} wlr-randr 2>>"$session/resize.log" | awk 'NR==1{print $1}')
+    [ -n "$kms_output" ] || return 1
+    XDG_RUNTIME_DIR=${kms_socket%/*} WAYLAND_DISPLAY=${kms_socket##*/} wlr-randr --output "$kms_output" --custom-mode "${1}x${2}" 2>>"$session/resize.log"
 }
 lr_fit_windows() {
     # Nested compositors (Wayfire, Phosh, Plasma Mobile) draw into one window
@@ -433,7 +448,7 @@ while [ ! -f "$session/stop" ] && application_live && kill -0 "$vpid" 2>/dev/nul
         if [ -n "$request" ]; then
             rw=${request%x*}; rh=${request#*x}
             if [ "$rw" -ge 320 ] && [ "$rh" -ge 240 ] && [ "$rw" -le "$side" ] && [ "$rh" -le "$side" ] && [ $((rw % 2)) -eq 0 ] && [ $((rh % 2)) -eq 0 ]; then
-                if lr_resize "$rw" "$rh"; then
+                if lr_kms_resize "$rw" "$rh" && lr_resize "$rw" "$rh"; then
                     lr_fit_windows "$width" "$height" "$rw" "$rh"
                     width=$rw; height=$rh; echo "${rw}x${rh}" > "$session/resize-result"
                     echo "GUI_SESSION: resized=${rw}x${rh}"

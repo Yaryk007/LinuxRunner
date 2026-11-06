@@ -213,6 +213,10 @@ static NSString *ApplicationPreflightFailure(NSURL *session) {
     _touchpadHint.frame=CGRectInset(self.bounds,16,16);
     CGFloat fit=(_pixelWidth&&_pixelHeight)?MIN(self.bounds.size.width/_pixelWidth,self.bounds.size.height/_pixelHeight):1;
     CGSize size=CGSizeMake(_pixelWidth*fit*_zoom,_pixelHeight*fit*_zoom);
+    // Same shape as the view apart from rounding (sizes are even, the home
+    // indicator area...): fill it exactly instead of leaving thin black bars.
+    if(_pixelWidth&&_pixelHeight&&self.bounds.size.height>0){double shape=((double)_pixelWidth/_pixelHeight)/(self.bounds.size.width/self.bounds.size.height);
+        if(shape>.97&&shape<1.03)size=CGSizeMake(self.bounds.size.width*_zoom,self.bounds.size.height*_zoom);}
     CGFloat limitX=MAX(0,(size.width-self.bounds.size.width)/2),limitY=MAX(0,(size.height-self.bounds.size.height)/2);
     _viewportOffset=CGPointMake(MAX(-limitX,MIN(limitX,_viewportOffset.x)),MAX(-limitY,MIN(limitY,_viewportOffset.y)));
     _image.frame=CGRectMake((self.bounds.size.width-size.width)/2+_viewportOffset.x,(self.bounds.size.height-size.height)/2+_viewportOffset.y,size.width,size.height);
@@ -1436,7 +1440,7 @@ static NSString *LRSessionGraphicsMode(void){
     _audioPort=0;
     if(LRAudioBridge.enabled){int afd=socket(AF_INET,SOCK_STREAM,0);struct sockaddr_in a2={.sin_family=AF_INET,.sin_port=0};a2.sin_addr.s_addr=htonl(INADDR_LOOPBACK);socklen_t l2=sizeof a2;
         if(afd>=0&&!bind(afd,(struct sockaddr *)&a2,sizeof a2)&&!getsockname(afd,(struct sockaddr *)&a2,&l2)&&ntohs(a2.sin_port)!=port)_audioPort=ntohs(a2.sin_port);if(afd>=0)close(afd);}
-    if(_desktopMode){NSString *key=[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName];id saved=[NSUserDefaults.standardUserDefaults objectForKey:key];_resolution.selectedSegmentIndex=saved?MAX(0,MIN(6,[saved integerValue])):3;}
+    if(_desktopMode){NSString *key=[@"LinuxRunnerDesktop.resolution." stringByAppendingString:LRRuntimeBridge.activeRootName];id saved=[NSUserDefaults.standardUserDefaults objectForKey:key];_resolution.selectedSegmentIndex=saved?MAX(0,MIN(6,[saved integerValue])):5;}
     NSString *geometry=[self selectedGeometryForSize:self.view.bounds.size];
     {unsigned gw=0,gh=0;if(sscanf(geometry.UTF8String,"%ux%u",&gw,&gh)==2)[LRRuntimeBridge setDesktopDisplayWidth:gw height:gh];}   // KMS compositors use exactly this size
     [LRRuntimeBridge logCategory:@"GUI_SESSION" event:[NSString stringWithFormat:@"root=%@ distribution=%@ geometry=%@ mode=%@ GLX=%@ (server capability; application renderer is independent)",LRRuntimeBridge.activeRootName,[LRRuntimeBridge activeEnvironmentIsDebian]?@"debian":@"alpine",geometry,mode,glxMode]];
@@ -1445,7 +1449,7 @@ static NSString *LRSessionGraphicsMode(void){
     NSDictionary *files=@{@"desktop-environment":([selectedDesktop isEqual:@"plasma"]||[selectedDesktop isEqual:@"lxqt"]||[selectedDesktop isEqual:@"enlightenment"]||[selectedDesktop isEqual:@"wayfire"]||[selectedDesktop isEqual:@"hyprland"]||[selectedDesktop isEqual:@"phosh"]||[selectedDesktop isEqual:@"plasma-mobile"])?selectedDesktop:@"linuxrunner",@"guest-user":_sessionGuestUser,@"geometry":geometry,@"glx-mode":glxMode,@"gpu-mode":LRSessionGraphicsMode(),@"input-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUIEagerInput"]?@"eager":@"legacy",@"shm-mode":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUISharedImages"]?@"sysv":@"off",@"vnc-timing":[NSUserDefaults.standardUserDefaults boolForKey:@"LinuxRunnerGUILowLatencyInput"]?@"threads":@"default",@"password":password,@"cookie":cookie,@"port":[NSString stringWithFormat:@"%u",port],@"audio-port":_audioPort?[NSString stringWithFormat:@"%u",_audioPort]:@"",@"display":[NSString stringWithFormat:@"%u",display]};
     for(NSString *name in files){NSURL *url=[_sessionURL URLByAppendingPathComponent:name];if(![files[name] writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&error]||![NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:url.path error:&error]){[self message:error.localizedDescription];return;}}
     // LinuxRunner fork: Native follows rotation live (session.sh resizes Xvfb).
-    if(_desktopMode&&_resolution.selectedSegmentIndex==5)[@"1" writeToURL:[_sessionURL URLByAppendingPathComponent:@"resizable"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    if(_desktopMode)[@"1" writeToURL:[_sessionURL URLByAppendingPathComponent:@"resizable"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     _liveGeometry=geometry;
     NSString *xkb=[NSUserDefaults.standardUserDefaults stringForKey:@"LinuxRunnerGUIXKBMode"]?:@"xkb";
     [xkb writeToURL:[_sessionURL URLByAppendingPathComponent:@"xkb-mode"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1543,14 +1547,22 @@ static NSString *DesktopDegradedNotice(NSString *state){
     switch(_resolution.selectedSegmentIndex){
         case 4:return [self fitScreenGeometry];
         case 5:return [self nativeGeometryForSize:size];
-        case 6:return [self customGeometry];
-        default:return @[@"640x480",@"800x600",@"1024x768",@"960x540"][MAX(0,MIN(3,_resolution.selectedSegmentIndex))];
+        case 6:return [self geometry:[self customGeometry] orientedForSize:size];
+        default:return [self geometry:@[@"640x480",@"800x600",@"1024x768",@"960x540"][MAX(0,MIN(3,_resolution.selectedSegmentIndex))] orientedForSize:size];
     }
 }
-// Rotation with Native: hand the new size to the running session.
+// Fixed sizes turn with the device: 960x540 in landscape is 540x960 in portrait.
+- (NSString *)geometry:(NSString *)geometry orientedForSize:(CGSize)size{
+    unsigned w=0,h=0;
+    if(sscanf(geometry.UTF8String,"%ux%u",&w,&h)!=2||[self externalOutputActive])return geometry;
+    BOOL portrait=size.height>size.width;
+    if(portrait==(h>w)||w==h||MIN(w,h)<320)return geometry;
+    return [NSString stringWithFormat:@"%ux%u",h,w];
+}
+// Rotation: hand the new size to the running session.
 - (void)requestLiveResizeForSize:(CGSize)size{
-    if(!_desktopMode||_resolution.selectedSegmentIndex!=5||!_sessionURL||!_sessionGuestUser)return;
-    NSString *geometry=[self nativeGeometryForSize:size];
+    if(!_desktopMode||!_sessionURL||!_sessionGuestUser)return;
+    NSString *geometry=[self selectedGeometryForSize:size];
     if([geometry isEqual:_liveGeometry])return;
     NSString *state=[NSString stringWithContentsOfURL:[_sessionURL URLByAppendingPathComponent:@"resizable-state"] encoding:NSUTF8StringEncoding error:nil];
     if(![[state stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqual:@"yes"]){
@@ -1560,6 +1572,7 @@ static NSString *DesktopDegradedNotice(NSString *state){
     if([LRRuntimeBridge writeDesktopRequest:[geometry dataUsingEncoding:NSUTF8StringEncoding] guestPath:[guestPath stringByAppendingString:@".pending"] user:_sessionGuestUser error:&error]&&
        [LRRuntimeBridge publishDesktopRequest:guestPath user:_sessionGuestUser error:&error]){
         _liveGeometry=geometry;[LRRuntimeBridge logCategory:@"GUI" event:[NSString stringWithFormat:@"live resize requested %@",geometry]];
+        unsigned gw=0,gh=0;if(sscanf(geometry.UTF8String,"%ux%u",&gw,&gh)==2)[LRRuntimeBridge setDesktopDisplayWidth:gw height:gh];
     } else [LRRuntimeBridge logCategory:@"GUI" event:[NSString stringWithFormat:@"live resize request failed: %@",error.localizedDescription]];
 }
 // iPad / hardware keyboard: app actions on Control-Option-Command, a combination
@@ -1794,7 +1807,7 @@ static NSString *DesktopDegradedNotice(NSString *state){
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
     if(_desktopMode){id automatic=[NSUserDefaults.standardUserDefaults objectForKey:@"LinuxRunnerDesktop.autoFullscreen"];
         if(!automatic||[automatic boolValue])[coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext>c){[self setImmersive:size.width>size.height];} completion:nil];
-        [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext>c){[self requestLiveResizeForSize:self.view.bounds.size];}];}
+        [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext>c){[self.surface fitViewport];[self requestLiveResizeForSize:self.view.bounds.size];}];}
 }
 - (NSDictionary *)desktopControlState {
     NSMutableDictionary *state=[[self desktopSessionSummary] mutableCopy];

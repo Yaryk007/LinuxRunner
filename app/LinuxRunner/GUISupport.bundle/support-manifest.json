@@ -44,7 +44,7 @@
     },
     {
       "name": "desktop-components.sh",
-      "sha256": "9109fd18a968ee5f6866f87745b80fc67520a8b9872f78cd399167a7a8342324",
+      "sha256": "bc00f2f1babaf78612e4701c7d05340ccea0b26ec18dbaeb16f609befdea6eea",
       "mode": "0755"
     },
     {
@@ -84,7 +84,7 @@
     },
     {
       "name": "desktop-profile.sh",
-      "sha256": "e88e6a2da13f4ae7c6efc1fdedf13f7194254dadd45ae03b409ee6ea77223557",
+      "sha256": "ca36550a179fba2fb0d74eb16b9291c387c97c04ccbd284dd227d11a62ea0664",
       "mode": "0755"
     },
     {
@@ -369,7 +369,7 @@
     },
     {
       "name": "lr-kms-bridge.c",
-      "sha256": "9b1916f9c7efc4ba17623004f25457e9d2ed32d97a6eaff7e75ee2c0dfcbdd7f",
+      "sha256": "690aec73c8aeab3cdd3ac443e312740737a5b16470024dbe156c710c7e126e9e",
       "mode": "0644"
     },
     {
@@ -414,7 +414,7 @@
     },
     {
       "name": "session.sh",
-      "sha256": "3a2cc4f57b79585eb62d2b07cd12249baf6eb43be3dd7a2e591d24e7fc91ec78",
+      "sha256": "a86a51ff4f5567d155693f8b94ee9ceed4ca1312d05442c6414abcd2911910ba",
       "mode": "0755"
     },
     {

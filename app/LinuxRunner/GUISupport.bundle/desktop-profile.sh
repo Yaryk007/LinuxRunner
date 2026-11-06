@@ -344,7 +344,7 @@ case "$mode" in
                 -- wayfire \
                 -- wayfire wf-shell foot || support_fail PROFILE wayfire-packages
         fi
-        install_optional "Wayfire extras" wcm xwayland -- -- wcm xorg-xwayland
+        install_optional "Wayfire extras" wcm xwayland wlr-randr -- wlr-randr -- wcm xorg-xwayland wlr-randr
         have wayfire && have wf-panel && have foot || support_fail PROFILE wayfire-missing
         echo 'PROFILE: wayfire=PASS';;
     phosh)
@@ -359,9 +359,9 @@ case "$mode" in
                 -- phosh phoc squeekboard foot \
                 -- phosh phoc squeekboard foot || support_fail PROFILE phosh-packages
         fi
-        install_optional "Phosh extras" phosh-mobile-tweaks xwayland adwaita-icon-theme fonts-cantarell gnome-settings-daemon \
-            -- xwayland adwaita-icon-theme font-cantarell gnome-settings-daemon \
-            -- xorg-xwayland adwaita-icon-theme cantarell-fonts gnome-settings-daemon
+        install_optional "Phosh extras" phosh-mobile-tweaks xwayland adwaita-icon-theme fonts-cantarell gnome-settings-daemon wlr-randr \
+            -- xwayland adwaita-icon-theme font-cantarell gnome-settings-daemon wlr-randr \
+            -- xorg-xwayland adwaita-icon-theme cantarell-fonts gnome-settings-daemon wlr-randr
         phosh_present || support_fail PROFILE phosh-missing
         # Optional, for the Metal GPU (Settings › Graphics): seat daemon, Mesa's
         # virgl driver and the build files of LinuxRunner's KMS display bridge.

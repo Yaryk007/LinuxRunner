@@ -236,6 +236,7 @@ WF_SHELL_INI
     until socket=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep -m1 '^wayland-[0-9]*$') && [ -S "$XDG_RUNTIME_DIR/$socket" ]; do
      i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep .5; done
     publish_wayland "$XDG_RUNTIME_DIR/$socket"
+    echo "$XDG_RUNTIME_DIR/$socket" > "$session/kms-wayland"
     WAYLAND_DISPLAY=$socket exec "$bridge" /dev/dri/card1 ) >> "$session/kms-bridge.log" 2>&1 & panel=$!
  else
   wayfire > "$session/wayfire.log" 2>&1 & wm=$!; panel=$wm; surface=$wm
@@ -297,6 +298,7 @@ elif [ "$environment" = phosh ] || [ "$environment" = plasma-mobile ]; then
    ( i=0
      until socket=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep -m1 '^wayland-[0-9]*$') && [ -S "$XDG_RUNTIME_DIR/$socket" ]; do
       i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep .5; done
+     echo "$XDG_RUNTIME_DIR/$socket" > "$session/kms-wayland"
      WAYLAND_DISPLAY=$socket exec "$bridge" /dev/dri/card1 ) >> "$session/kms-bridge.log" 2>&1 & panel=$!
   fi
   limit=900
