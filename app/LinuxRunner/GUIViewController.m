@@ -949,11 +949,21 @@ static NSString *DesktopDegradedNotice(NSString *state);
 }
 - (void)showStartStage:(NSString *)title detail:(NSString *)detail busy:(BOOL)busy{
     [self buildStartPanel];[self.view bringSubviewToFront:_startPanel];
-    _startPanel.hidden=NO;_startTitle.text=title;_startDetail.text=detail;_startButtons.hidden=busy;
+    _startPanel.hidden=NO;_startPanel.transform=CGAffineTransformIdentity;_startPanel.userInteractionEnabled=YES;_startDetail.hidden=NO;
+    _startTitle.text=title;_startDetail.text=detail;_startButtons.hidden=busy;
     if(busy)[_startSpinner startAnimating];else [_startSpinner stopAnimating];_startSpinner.hidden=!busy;
     _status.text=title;
 }
 - (void)hideStartPanel{_startPanel.hidden=YES;[_startSpinner stopAnimating];}
+// The desktop is drawing but not finished: a small strip at the bottom that
+// neither covers the picture nor takes its touches.
+- (void)compactStartPanel{
+    if(!_startPanel||_startPanel.hidden)return;
+    _startTitle.text=@"Desktop still starting…";_startDetail.hidden=YES;_startButtons.hidden=YES;_startPanel.userInteractionEnabled=NO;
+    [self.view layoutIfNeeded];
+    CGFloat drop=self.view.bounds.size.height/2-_startPanel.bounds.size.height/2-self.view.safeAreaInsets.bottom-16;
+    _startPanel.transform=CGAffineTransformMakeTranslation(0,MAX(0,drop));
+}
 - (NSString *)supportText:(NSString *)name{return [[NSString stringWithContentsOfURL:[_supportURL URLByAppendingPathComponent:name] encoding:NSUTF8StringEncoding error:nil] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];}
 - (NSDate *)supportDate:(NSString *)name{return [NSFileManager.defaultManager attributesOfItemAtPath:[_supportURL URLByAppendingPathComponent:name].path error:nil].fileModificationDate;}
 // A recent "ready" result stays valid until the bundled support changes
@@ -1207,6 +1217,9 @@ static NSString *LRTail(NSURL *url,NSUInteger lines){
     NSString *state=[NSString stringWithContentsOfURL:[_sessionURL URLByAppendingPathComponent:@"desktop-state"] encoding:NSUTF8StringEncoding error:nil];
     if(DesktopDegradedNotice(state)){[self desktopStartFailed:@"Desktop components could not initialize" detail:DesktopDegradedNotice(state)];return;}
     if(_sessionTerminal.sessionPid<=0||[NSFileManager.defaultManager fileExistsAtPath:[_sessionURL URLByAppendingPathComponent:@"stop"].path]){[self desktopStartFailed:@"The desktop session stopped" detail:@"Details contains the component startup logs. Existing Linux files are preserved."];return;}
+    // Slow desktops are allowed far longer by desktop-components.sh (Plasma: 16
+    // minutes) and report their own timeout. Once a picture arrives, show it.
+    if(_desktopPainted){[self compactStartPanel];return;}
     if(-[_profileStarted timeIntervalSinceNow]>240){[_profileTimer invalidate];_profileTimer=nil;
         [self desktopStartFailed:@"The display did not appear" detail:@"Linux started the desktop session, but no picture arrived within 4 minutes.\n\nError: DISPLAY_INITIALIZATION_ERROR. Tap Retry; Details shows the session log."];}
 }
